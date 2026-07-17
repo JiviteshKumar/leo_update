@@ -1,5 +1,7 @@
 import { describeAiError, healStep } from '@/utils/ai';
+import { FE_URL, fetchAccount, signOutFe } from '@/utils/fe';
 import type {
+  Account,
   ContentMessage,
   ElementStep,
   ExecResult,
@@ -38,6 +40,15 @@ export default defineBackground(() => {
   // Resolves the step-failed pause with the user's choice.
   let failureResolver: ((choice: 'retry' | 'skip' | 'end') => void) | null = null;
   let keepalive: ReturnType<typeof setInterval> | null = null;
+  // Leo Cloud session, cached so the panel's poll doesn't hit fe every tick.
+  let account: Account | null = null;
+  let accountFetched = false;
+
+  const refreshAccount = async (): Promise<Account | null> => {
+    account = await fetchAccount();
+    accountFetched = true;
+    return account;
+  };
 
   const getRec = async (): Promise<RecState | null> => {
     const res = await browser.storage.session.get(REC_KEY);
@@ -535,6 +546,17 @@ export default defineBackground(() => {
   // Wiring
   // ---------------------------------------------------------------------------
 
+  // Session pickup: whenever a page on the fe origin finishes loading
+  // (e.g. the post-OAuth redirect after the user signs in), re-read the
+  // session so the panel reflects it without any manual refresh.
+  browser.webNavigation.onCompleted.addListener(
+    (details) => {
+      if (details.frameId !== 0) return;
+      void refreshAccount().then(broadcast);
+    },
+    { url: [{ urlPrefix: FE_URL }] },
+  );
+
   browser.action.onClicked.addListener(async (tab) => {
     if (tab.windowId != null) {
       await (browser as unknown as {
@@ -624,6 +646,20 @@ export default defineBackground(() => {
             }
             case 'panel.retryStep': {
               failureResolver?.('retry');
+              return { ok: true };
+            }
+            case 'panel.getAccount': {
+              if (msg.refresh || !accountFetched) await refreshAccount();
+              return { account };
+            }
+            case 'panel.signIn': {
+              await browser.tabs.create({ url: `${FE_URL}/?from=extension`, active: true });
+              return { ok: true };
+            }
+            case 'panel.signOut': {
+              await signOutFe();
+              await refreshAccount();
+              broadcast();
               return { ok: true };
             }
             case 'panel.getSettings':

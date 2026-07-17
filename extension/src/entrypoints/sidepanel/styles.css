@@ -149,6 +149,15 @@ button.danger {
   color: var(--danger);
 }
 
+button.link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 button.record {
   display: flex;
   align-items: center;

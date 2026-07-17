@@ -92,6 +92,13 @@ export interface Settings {
   speed: RunSpeed;
 }
 
+// Signed-in Leo Cloud user, read from the fe app's better-auth session.
+export interface Account {
+  name: string;
+  email: string;
+  image?: string | null;
+}
+
 export const DEFAULT_MODEL = 'claude-opus-4-8';
 export const DEFAULT_CURSOR_COLOR = '#4c8bf5';
 export const DEFAULT_SPEED: RunSpeed = 'verbose';
@@ -129,7 +136,11 @@ export type PanelMessage =
   // Re-run the step that just failed.
   | { kind: 'panel.retryStep' }
   | { kind: 'panel.getSettings' }
-  | { kind: 'panel.setSettings'; settings: Settings };
+  | { kind: 'panel.setSettings'; settings: Settings }
+  | { kind: 'panel.getAccount'; refresh?: boolean }
+  // Opens the fe app in a tab so the user can sign in with Google there.
+  | { kind: 'panel.signIn' }
+  | { kind: 'panel.signOut' };
 
 export type ContentMessage =
   | { kind: 'rec.step'; step: Step; replaceLastClicks?: number }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
+  Account,
   PanelMessage,
   PanelState,
   Settings,
@@ -46,6 +47,8 @@ export function App() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [flash, setFlash] = useState<string | null>(null);
+  // undefined = not checked yet, null = checked and signed out.
+  const [account, setAccount] = useState<Account | null | undefined>(undefined);
   const [settings, setSettingsState] = useState<Settings>({
     apiKey: '',
     model: DEFAULT_MODEL,
@@ -55,6 +58,10 @@ export function App() {
 
   const refresh = useCallback(() => {
     void send<PanelState>({ kind: 'panel.getState' }).then(setState).catch(() => {});
+    // Served from the background's cache; only sign-in/out refetches.
+    void send<{ account: Account | null }>({ kind: 'panel.getAccount' })
+      .then((res) => setAccount(res.account))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -105,6 +112,42 @@ export function App() {
           </button>
           <span className="brand">Settings</span>
         </header>
+        <section className="card">
+          <h2>Leo Cloud</h2>
+          {account ? (
+            <>
+              <p className="hint">
+                Signed in as <strong>{account.email}</strong>
+              </p>
+              <div className="row">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setAccount(null);
+                    void send({ kind: 'panel.signOut' });
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="hint">
+                Sign in to sync your workflows across devices. Opens the Leo web
+                app; you&apos;ll be back here in a moment.
+              </p>
+              <div className="row">
+                <button
+                  className="primary"
+                  onClick={() => void send({ kind: 'panel.signIn' })}
+                >
+                  Sign in with Google
+                </button>
+              </div>
+            </>
+          )}
+        </section>
         <section className="card">
           <label className="field">
             <span>Anthropic API key</span>
@@ -386,6 +429,16 @@ export function App() {
                 Records the active tab. Do the task once; Leo remembers it forever.
               </p>
             </section>
+          )}
+
+          {account === null && (
+            <p className="hint">
+              Not signed in &mdash;{' '}
+              <button className="link" onClick={() => void send({ kind: 'panel.signIn' })}>
+                sign in
+              </button>{' '}
+              to sync your workflows.
+            </p>
           )}
         </>
       )}
