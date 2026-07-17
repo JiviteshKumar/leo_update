@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# WXT build output and generated types
+.output/
+.wxt/
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# OS
+.DS_Store
