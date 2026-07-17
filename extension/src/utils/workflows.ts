@@ -13,6 +13,11 @@ export const listWorkflows = async (): Promise<Workflow[]> => {
 export const getWorkflow = async (id: string): Promise<Workflow | null> =>
   (await listWorkflows()).find((w) => w.id === id) ?? null;
 
+// Bulk replace after a cloud sync merge.
+export const replaceWorkflows = async (all: Workflow[]): Promise<void> => {
+  await browser.storage.local.set({ [WORKFLOWS_KEY]: all });
+};
+
 export const saveWorkflow = async (workflow: Workflow): Promise<void> => {
   const all = await listWorkflows();
   const next = [workflow, ...all.filter((w) => w.id !== workflow.id)];

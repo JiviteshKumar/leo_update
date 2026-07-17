@@ -1,5 +1,12 @@
 import { describeAiError, healStep } from '@/utils/ai';
-import { FE_URL, fetchAccount, signOutFe } from '@/utils/fe';
+import {
+  FE_URL,
+  deleteWorkflowRemote,
+  fetchAccount,
+  pullWorkflows,
+  pushWorkflow,
+  signOutFe,
+} from '@/utils/fe';
 import type {
   Account,
   ContentMessage,
@@ -18,6 +25,7 @@ import {
   getSettings,
   getWorkflow,
   listWorkflows,
+  replaceWorkflows,
   saveWorkflow,
   setSettings,
 } from '@/utils/workflows';
@@ -47,7 +55,55 @@ export default defineBackground(() => {
   const refreshAccount = async (): Promise<Account | null> => {
     account = await fetchAccount();
     accountFetched = true;
+    if (account) void syncWorkflows();
     return account;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Workflow cloud sync: pull + merge (last-write-wins by updatedAt, keyed on
+  // the workflow UUID), then push anything where local is newer or cloud-only
+  // missing. Individual mutations also push fire-and-forget; a later sync
+  // reconciles anything a failed push left behind.
+  // ---------------------------------------------------------------------------
+
+  let syncing = false;
+
+  const syncWorkflows = async (): Promise<void> => {
+    if (syncing) return;
+    syncing = true;
+    try {
+      const remote = await pullWorkflows();
+      if (!remote) return; // signed out or fe unreachable
+      const local = await listWorkflows();
+      const remoteById = new Map(remote.map((w) => [w.id, w]));
+      const merged = new Map(local.map((w) => [w.id, w]));
+      const toPush: Workflow[] = [];
+
+      for (const r of remote) {
+        const l = merged.get(r.id);
+        if (!l || r.updatedAt > l.updatedAt) merged.set(r.id, r);
+        else if (l.updatedAt > r.updatedAt) toPush.push(l);
+      }
+      // Local-only workflows (recorded before sign-in or while offline).
+      for (const l of local) if (!remoteById.has(l.id)) toPush.push(l);
+
+      const changed =
+        merged.size !== local.length ||
+        local.some((l) => merged.get(l.id) !== l);
+      if (changed) {
+        await replaceWorkflows(
+          [...merged.values()].sort((a, b) => b.updatedAt - a.updatedAt),
+        );
+        broadcast();
+      }
+      for (const w of toPush) void pushWorkflow(w);
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const pushIfSignedIn = (wf: Workflow) => {
+    if (account) void pushWorkflow(wf);
   };
 
   const getRec = async (): Promise<RecState | null> => {
@@ -166,6 +222,7 @@ export default defineBackground(() => {
       healCount: 0,
     };
     await saveWorkflow(workflow);
+    pushIfSignedIn(workflow);
     broadcast();
     return { ok: true };
   };
@@ -383,6 +440,7 @@ export default defineBackground(() => {
       workflow.healCount += 1;
       workflow.updatedAt = Date.now();
       await saveWorkflow(workflow);
+      pushIfSignedIn(workflow);
     }
     if (run) {
       run.healedSteps = [...run.healedSteps, stepIndex];
@@ -607,6 +665,7 @@ export default defineBackground(() => {
               return { ok: true };
             case 'panel.deleteWorkflow':
               await deleteWorkflow(msg.id);
+              if (account) void deleteWorkflowRemote(msg.id);
               broadcast();
               return { ok: true };
             case 'panel.renameWorkflow': {
@@ -615,6 +674,7 @@ export default defineBackground(() => {
                 wf.name = msg.name.trim() || wf.name;
                 wf.updatedAt = Date.now();
                 await saveWorkflow(wf);
+                pushIfSignedIn(wf);
                 broadcast();
               }
               return { ok: true };
@@ -679,4 +739,9 @@ export default defineBackground(() => {
       return true;
     },
   );
+
+  // Check the session (and pull the cloud copy if signed in) every time the
+  // service worker wakes, so another device's changes appear without any
+  // user action.
+  void refreshAccount();
 });

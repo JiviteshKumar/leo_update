@@ -26,8 +26,8 @@ export default async function Dashboard() {
         <h2 className="font-semibold">Synced workflows</h2>
         {items.length === 0 && (
           <p className="text-sm text-neutral-400">
-            Nothing synced yet. Workflows recorded in the Leo extension will show
-            up here once sync is connected.
+            Nothing synced yet. Record a workflow in the Leo extension and it
+            will appear here.
           </p>
         )}
         {items.map((wf) => (
