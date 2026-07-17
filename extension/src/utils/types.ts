@@ -17,6 +17,14 @@ export interface TargetInfo {
   framePath: string[];
 }
 
+// Held modifiers for a key press. Absent flags are false.
+export interface KeyMods {
+  ctrl?: boolean;
+  meta?: boolean;
+  alt?: boolean;
+  shift?: boolean;
+}
+
 export type Step =
   // Explicit navigation (typed URL, reload). Replay drives tabs.update.
   | { type: 'navigate'; url: string }
@@ -27,7 +35,10 @@ export type Step =
   // `secret` steps never store the text; replay pauses for the user.
   | { type: 'type'; target: TargetInfo; text: string; secret: boolean }
   | { type: 'select'; target: TargetInfo; value: string; label: string }
-  | { type: 'key'; key: 'Enter' | 'Tab' | 'Escape'; target?: TargetInfo }
+  // A discrete key press: named non-printable keys (Enter, Tab, Escape,
+  // Arrow*, …) and keyboard shortcuts (`mods` holds ctrl/meta/alt/shift).
+  // Plain printable typing is captured as `type` steps, not here.
+  | { type: 'key'; key: string; mods?: KeyMods; target?: TargetInfo }
   // A file download happened here. Replay waits for it to complete.
   | { type: 'download' };
 
@@ -35,6 +46,8 @@ export type ElementStep = Extract<
   Step,
   { type: 'click' | 'dblclick' | 'type' | 'select' }
 >;
+
+export type KeyStep = Extract<Step, { type: 'key' }>;
 
 export interface Workflow {
   id: string;
@@ -103,6 +116,11 @@ export const DEFAULT_MODEL = 'claude-opus-4-8';
 export const DEFAULT_CURSOR_COLOR = '#4c8bf5';
 export const DEFAULT_SPEED: RunSpeed = 'verbose';
 
+// Custom-element tag hosting the floating menu's shadow root. Events that
+// originate inside the shadow root retarget to this host when observed at
+// `window`, so the recorder ignores anything whose target is this tag.
+export const LEO_UI_HOST = 'leo-ui';
+
 // ---------------------------------------------------------------------------
 // AI healing
 // ---------------------------------------------------------------------------
@@ -140,7 +158,11 @@ export type PanelMessage =
   | { kind: 'panel.getAccount'; refresh?: boolean }
   // Opens the fe app in a tab so the user can sign in with Google there.
   | { kind: 'panel.signIn' }
-  | { kind: 'panel.signOut' };
+  | { kind: 'panel.signOut' }
+  // Surface switching: dock the floating menu into the side panel, or the
+  // reverse. Handled by the background.
+  | { kind: 'panel.openSidePanel' }
+  | { kind: 'panel.openFloating' };
 
 export type ContentMessage =
   | { kind: 'rec.step'; step: Step; replaceLastClicks?: number }
@@ -148,12 +170,14 @@ export type ContentMessage =
 
 export type BgToContentMessage =
   | { kind: 'replay.ping' }
-  | { kind: 'replay.exec'; step: ElementStep | { type: 'key'; key: 'Enter' | 'Tab' | 'Escape'; target?: TargetInfo }; fast?: boolean }
+  | { kind: 'replay.exec'; step: ElementStep | KeyStep; fast?: boolean }
   | { kind: 'replay.execCandidate'; index: number; step: ElementStep; fast?: boolean }
   | { kind: 'replay.highlight'; target: TargetInfo }
   | { kind: 'replay.cursorHide' }
   | { kind: 'rec.attach' }
-  | { kind: 'rec.detach' };
+  | { kind: 'rec.detach' }
+  // Show/hide the floating menu, driven by the toolbar icon / surface switch.
+  | { kind: 'ui.setVisible'; visible: boolean };
 
 export type ExecResult =
   | { ok: true; healedSelectors?: string[] }

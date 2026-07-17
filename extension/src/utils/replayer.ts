@@ -1,6 +1,14 @@
 import { cursorHide, cursorMoveTo, cursorPulse, highlightElement } from './cursor';
 import { generateSelectors, isVisible, trySelector, visibleText } from './selectors';
-import type { Candidate, ElementStep, ExecResult, Step, TargetInfo } from './types';
+import type {
+  Candidate,
+  ElementStep,
+  ExecResult,
+  KeyMods,
+  KeyStep,
+  Step,
+  TargetInfo,
+} from './types';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -102,23 +110,45 @@ const typeInto = async (el: Element, text: string, fast: boolean): Promise<void>
   el.dispatchEvent(new Event('change', { bubbles: true }));
 };
 
-const dispatchKey = (el: Element, key: 'Enter' | 'Tab' | 'Escape'): void => {
-  const keyCode = key === 'Enter' ? 13 : key === 'Tab' ? 9 : 27;
-  const down = new KeyboardEvent('keydown', {
+const KEY_CODES: Record<string, number> = {
+  Enter: 13,
+  Tab: 9,
+  Escape: 27,
+  Backspace: 8,
+  Delete: 46,
+  Home: 36,
+  End: 35,
+  PageUp: 33,
+  PageDown: 34,
+  ArrowLeft: 37,
+  ArrowUp: 38,
+  ArrowRight: 39,
+  ArrowDown: 40,
+  ' ': 32,
+};
+
+const dispatchKey = (el: Element, key: string, mods: KeyMods = {}): void => {
+  const keyCode =
+    KEY_CODES[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+  const init: KeyboardEventInit = {
     key,
     keyCode,
     which: keyCode,
+    ctrlKey: mods.ctrl ?? false,
+    metaKey: mods.meta ?? false,
+    altKey: mods.alt ?? false,
+    shiftKey: mods.shift ?? false,
     bubbles: true,
     cancelable: true,
-  });
-  const handled = !el.dispatchEvent(down);
-  el.dispatchEvent(
-    new KeyboardEvent('keyup', { key, keyCode, which: keyCode, bubbles: true }),
-  );
+  };
+  const handled = !el.dispatchEvent(new KeyboardEvent('keydown', init));
+  el.dispatchEvent(new KeyboardEvent('keyup', init));
   // Synthetic Enter never triggers native form submission; mirror it
-  // manually when no handler claimed the event.
+  // manually when no handler claimed the event and it wasn't a shortcut.
   const form = (el as HTMLInputElement).form;
-  if (key === 'Enter' && !handled && form) form.requestSubmit();
+  if (key === 'Enter' && !mods.ctrl && !mods.meta && !mods.alt && !handled && form) {
+    form.requestSubmit();
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -190,7 +220,8 @@ const performOn = async (el: Element, step: Step, fast: boolean): Promise<void> 
     }
     case 'key': {
       cursorPulse(x, y);
-      dispatchKey(el, step.key);
+      (el as HTMLElement).focus?.();
+      dispatchKey(el, step.key, step.mods);
       break;
     }
     default:
@@ -200,13 +231,13 @@ const performOn = async (el: Element, step: Step, fast: boolean): Promise<void> 
 };
 
 export const execStep = async (
-  step: ElementStep | { type: 'key'; key: 'Enter' | 'Tab' | 'Escape'; target?: TargetInfo },
+  step: ElementStep | KeyStep,
   fast = false,
 ): Promise<ExecResult> => {
   try {
     if (step.type === 'key' && !step.target) {
       const el = document.activeElement ?? document.body;
-      dispatchKey(el, step.key);
+      dispatchKey(el, step.key, step.mods);
       return { ok: true };
     }
     const target = step.target!;

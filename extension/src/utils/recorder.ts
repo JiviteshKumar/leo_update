@@ -1,5 +1,6 @@
 import { buildTarget, fieldLabel } from './selectors';
-import type { Step } from './types';
+import { LEO_UI_HOST } from './types';
+import type { KeyMods, Step } from './types';
 
 // DOM event capture for recording. Attached in the capture phase on window
 // so the page can't stop events from reaching us. Only trusted (real user)
@@ -16,6 +17,17 @@ interface PendingType {
 const CLICKABLE =
   'a, button, input, select, textarea, label, [role="button"], [role="link"], ' +
   '[role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [onclick]';
+
+// True when an event came from Leo's own floating menu. Events crossing the
+// shadow boundary retarget to the <leo-ui> host, so `ev.target` alone catches
+// it; composedPath() is scanned too in case the target isn't yet retargeted.
+const isLeoEvent = (ev: Event): boolean => {
+  const isHost = (n: EventTarget | null): boolean =>
+    n instanceof Element && n.tagName.toLowerCase() === LEO_UI_HOST;
+  if (isHost(ev.target)) return true;
+  const path = ev.composedPath?.();
+  return path ? path.some(isHost) : false;
+};
 
 const isTextEntry = (el: Element): boolean => {
   if ((el as HTMLElement).isContentEditable) return true;
@@ -42,7 +54,7 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   };
 
   const onClick = (ev: MouseEvent) => {
-    if (!ev.isTrusted) return;
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
     const raw = ev.target as Element | null;
     if (!raw || !(raw instanceof Element)) return;
     const el = (raw.closest?.(CLICKABLE) as Element | null) ?? raw;
@@ -64,7 +76,7 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   };
 
   const onDblClick = (ev: MouseEvent) => {
-    if (!ev.isTrusted) return;
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
     const raw = ev.target as Element | null;
     if (!raw || !(raw instanceof Element)) return;
     const el = (raw.closest?.(CLICKABLE) as Element | null) ?? raw;
@@ -74,7 +86,7 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   };
 
   const onInput = (ev: Event) => {
-    if (!ev.isTrusted) return;
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
     const el = ev.target as Element | null;
     if (!el || !(el instanceof Element) || !isTextEntry(el)) return;
 
@@ -107,7 +119,7 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   // swallow one of them, so listen to both and dedupe on element + value.
   let lastSelect: { el: Element; value: string } | null = null;
   const onSelectPick = (ev: Event) => {
-    if (!ev.isTrusted) return;
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
     const el = ev.target as Element | null;
     if (!el || !(el instanceof Element)) return;
     if (el.tagName.toLowerCase() !== 'select') return;
@@ -124,21 +136,56 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   const onChange = onSelectPick;
 
   const onKeyDown = (ev: KeyboardEvent) => {
-    if (!ev.isTrusted) return;
-    if (ev.key !== 'Enter' && ev.key !== 'Tab' && ev.key !== 'Escape') return;
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
+    // A modifier held on its own carries no action.
+    if (ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Alt' || ev.key === 'Shift') {
+      return;
+    }
+
+    const cmdMod = ev.ctrlKey || ev.metaKey || ev.altKey;
     const active = document.activeElement;
     const inField = active ? isTextEntry(active) || active.tagName === 'SELECT' : false;
-    // Tab/Escape outside a field is browser chrome noise, not workflow.
-    if (ev.key !== 'Enter' && !inField) return;
+    const onControl = Boolean(active?.closest?.(CLICKABLE));
+
+    let record = false;
+    if (ev.key === 'Enter' || ev.key === 'Tab' || ev.key === 'Escape') {
+      // Tab/Escape outside a field is browser chrome noise, not workflow.
+      record = ev.key === 'Enter' || inField;
+    } else if (cmdMod) {
+      // A keyboard shortcut (Ctrl/Cmd/Alt + key). Clipboard/undo/select-all
+      // combos inside a text field are already reflected in the captured
+      // field value or are no-ops on replay, so skip them.
+      const editCombo =
+        inField && !ev.altKey && ['a', 'c', 'v', 'x', 'z', 'y'].includes(ev.key.toLowerCase());
+      record = !editCombo;
+    } else if (
+      ev.key === 'ArrowUp' ||
+      ev.key === 'ArrowDown' ||
+      ev.key === 'ArrowLeft' ||
+      ev.key === 'ArrowRight'
+    ) {
+      // Arrow navigation matters for comboboxes/autocompletes/menus; a plain
+      // arrow outside any control is just caret movement.
+      record = inField || onControl;
+    }
+    if (!record) return;
+
     flush();
+    const mods: KeyMods = {};
+    if (ev.ctrlKey) mods.ctrl = true;
+    if (ev.metaKey) mods.meta = true;
+    if (ev.altKey) mods.alt = true;
+    if (ev.shiftKey) mods.shift = true;
     emit({
       type: 'key',
-      key: ev.key as 'Enter' | 'Tab' | 'Escape',
-      target: active && inField ? buildTarget(active, 'click') : undefined,
+      key: ev.key,
+      ...(Object.keys(mods).length ? { mods } : {}),
+      target: active && (inField || onControl) ? buildTarget(active, 'click') : undefined,
     });
   };
 
   const onBlur = (ev: FocusEvent) => {
+    if (isLeoEvent(ev)) return;
     if (pending && ev.target === pending.el) flush();
   };
 

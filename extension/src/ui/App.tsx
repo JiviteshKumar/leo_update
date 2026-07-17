@@ -32,14 +32,25 @@ const stepLabel = (step: Step): string => {
         : `${step.target.intent}: "${step.text.slice(0, 30)}${step.text.length > 30 ? '...' : ''}"`;
     case 'select':
       return `${step.target.intent}: ${step.label}`;
-    case 'key':
-      return `Press ${step.key}`;
+    case 'key': {
+      const parts: string[] = [];
+      if (step.mods?.ctrl) parts.push('Ctrl');
+      if (step.mods?.meta) parts.push('Cmd');
+      if (step.mods?.alt) parts.push('Alt');
+      if (step.mods?.shift) parts.push('Shift');
+      parts.push(step.key.length === 1 ? step.key.toUpperCase() : step.key);
+      return `Press ${parts.join('+')}`;
+    }
     case 'download':
       return 'Wait for the file download';
   }
 };
 
-export function App() {
+// Which surface the App is rendered in. Drives the header's surface-switch
+// button (float ⇄ side panel).
+type Surface = 'float' | 'panel';
+
+export function App({ surface = 'panel' }: { surface?: Surface }) {
   const [state, setState] = useState<PanelState | null>(null);
   const [view, setView] = useState<View>('new');
   const [saveName, setSaveName] = useState('');
@@ -88,7 +99,7 @@ export function App() {
   // render the bare shell instead of flashing the sign-in gate.
   if (!state || account === undefined) {
     return (
-      <div className="shell">
+      <div className={`shell shell-${surface}`}>
         <header className="header"><span className="brand">Leo</span></header>
       </div>
     );
@@ -99,7 +110,7 @@ export function App() {
   // the opened tab, which lifts this gate automatically.
   if (account === null) {
     return (
-      <div className="shell">
+      <div className={`shell shell-${surface}`}>
         <header className="header">
           <span className="brand">Leo</span>
           <span className="tagline">Teach your browser a task once.</span>
@@ -132,7 +143,7 @@ export function App() {
 
   if (view === 'settings') {
     return (
-      <div className="shell">
+      <div className={`shell shell-${surface}`}>
         <header className="header">
           <button className="ghost small" onClick={() => setView('new')}>
             &#8592; Back
@@ -329,10 +340,21 @@ export function App() {
   );
 
   return (
-    <div className="shell">
+    <div className={`shell shell-${surface}`}>
       <header className="header">
         <span className="brand">Leo</span>
         <span className="tagline">Teach your browser a task once.</span>
+        <button
+          className="ghost small"
+          title={surface === 'float' ? 'Dock as side panel' : 'Show as floating menu'}
+          onClick={() =>
+            void send({
+              kind: surface === 'float' ? 'panel.openSidePanel' : 'panel.openFloating',
+            })
+          }
+        >
+          {surface === 'float' ? '⇥' : '❐'}
+        </button>
         <button className="ghost small" title="Settings" onClick={() => setView('settings')}>
           &#9881;
         </button>

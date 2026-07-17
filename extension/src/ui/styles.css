@@ -4,7 +4,9 @@
   padding: 0;
 }
 
-:root {
+/* The App renders inside .leo-root in both surfaces: the side-panel document
+   and the floating menu's shadow root (where :root / body don't apply). */
+.leo-root {
   color-scheme: dark;
   --bg: #101014;
   --card: #1a1a21;
@@ -15,12 +17,13 @@
   --accent-text: #1a1a1a;
   --danger: #e5484d;
   --ok: #46a758;
-}
-
-body {
-  background: var(--bg);
   color: var(--text);
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Side-panel document background; the wrapper covers the viewport anyway. */
+body {
+  background: #101014;
 }
 
 .shell {
@@ -28,6 +31,12 @@ body {
   flex-direction: column;
   gap: 12px;
   padding: 14px;
+  background: var(--bg);
+}
+
+/* Side panel fills its docked height; the floating card is height-bounded by
+   its container and scrolls internally. */
+.shell-panel {
   min-height: 100vh;
 }
 
@@ -350,4 +359,86 @@ h2 .dismiss:hover {
 .wf-actions {
   display: flex;
   gap: 6px;
+}
+
+/* ---------------------------------------------------------------------------
+   Floating menu (shadow-root surface)
+   --------------------------------------------------------------------------- */
+
+.leo-float {
+  position: fixed;
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  /* Just below the replay cursor overlay (2147483647). */
+  z-index: 2147483646;
+}
+
+.leo-float.hidden {
+  display: none;
+}
+
+/* Drag handle / title bar. */
+.leo-float-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: grab;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  background: var(--card);
+}
+
+.leo-float-bar.dragging {
+  cursor: grabbing;
+}
+
+.leo-float-bar .leo-float-title {
+  flex: 1;
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.leo-float-bar button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.leo-float-bar button:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* App content scrolls within the card. */
+.leo-float-body {
+  overflow-y: auto;
+}
+
+/* Collapsed: only the bar shows. */
+.leo-float.collapsed .leo-float-body {
+  display: none;
+}
+
+/* When collapsed, drop the bar's bottom border so it reads as a pill. */
+.leo-float.collapsed .leo-float-bar {
+  border-bottom: none;
+}
+
+.leo-float .shell {
+  min-height: 0;
 }
