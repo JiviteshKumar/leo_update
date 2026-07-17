@@ -35,7 +35,6 @@ export const getSettings = async (): Promise<Settings> => {
   const res = await browser.storage.local.get(SETTINGS_KEY);
   const s = (res[SETTINGS_KEY] as Partial<Settings> | undefined) ?? {};
   return {
-    apiKey: s.apiKey ?? '',
     model: s.model ?? DEFAULT_MODEL,
     cursorColor: s.cursorColor ?? DEFAULT_CURSOR_COLOR,
     speed: s.speed ?? DEFAULT_SPEED,

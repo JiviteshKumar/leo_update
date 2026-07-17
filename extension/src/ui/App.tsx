@@ -54,6 +54,8 @@ const stepLabel = (step: Step): string => {
     }
     case 'download':
       return 'Wait for the file download';
+    case 'agent':
+      return `AI: ${step.goal}`;
   }
 };
 
@@ -64,11 +66,13 @@ export function App() {
   const [saving, setSaving] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  // Step editor: id of the workflow whose steps are open, and the working copy.
+  const [editingStepsId, setEditingStepsId] = useState<string | null>(null);
+  const [draftSteps, setDraftSteps] = useState<Step[]>([]);
   const [flash, setFlash] = useState<string | null>(null);
   // undefined = not checked yet, null = checked and signed out.
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   const [settings, setSettingsState] = useState<Settings>({
-    apiKey: '',
     model: DEFAULT_MODEL,
     cursorColor: DEFAULT_CURSOR_COLOR,
     speed: DEFAULT_SPEED,
@@ -190,15 +194,6 @@ export function App() {
         </section>
         <section className="card">
           <label className="field">
-            <span>Anthropic API key</span>
-            <input
-              type="password"
-              placeholder="sk-ant-..."
-              value={settings.apiKey}
-              onChange={(e) => setSettingsState({ ...settings, apiKey: e.target.value })}
-            />
-          </label>
-          <label className="field">
             <span>Repair model</span>
             <select
               value={settings.model}
@@ -211,8 +206,7 @@ export function App() {
           </label>
           <p className="hint">
             When a website changes and a recorded step breaks, Leo asks Claude to find
-            the same control on the new page and repairs the workflow. Without a key,
-            replay still works but broken steps fail instead of self-healing.
+            the same control on the new page and repairs the workflow.
           </p>
           <div className="field">
             <span>Replay speed</span>
@@ -330,6 +324,9 @@ export function App() {
         Step {Math.min(run.stepIndex + 1, run.totalSteps)} of {run.totalSteps}
         {run.healedSteps.length > 0 && ` (${run.healedSteps.length} repaired by AI)`}
       </p>
+      {run.status === 'running' && run.agentNote && (
+        <p className="hint agent-note">✦ {run.agentNote}</p>
+      )}
       {(run.status === 'error' || run.status === 'step-failed') && (
         <p className="error">{run.error}</p>
       )}
@@ -474,6 +471,7 @@ export function App() {
         </>
       )}
 
+      {/* StepEditor defined below */}
       {view === 'saved' && (
         <section className="list">
           {workflows.length === 0 && (
@@ -481,7 +479,17 @@ export function App() {
           )}
           {workflows.map((wf: Workflow) => (
             <div className="workflow" key={wf.id}>
-              {renamingId === wf.id ? (
+              {editingStepsId === wf.id ? (
+                <StepEditor
+                  steps={draftSteps}
+                  onChange={setDraftSteps}
+                  onSave={() => {
+                    void send({ kind: 'panel.updateWorkflowSteps', id: wf.id, steps: draftSteps });
+                    setEditingStepsId(null);
+                  }}
+                  onCancel={() => setEditingStepsId(null)}
+                />
+              ) : renamingId === wf.id ? (
                 <input
                   autoFocus
                   value={renameValue}
@@ -503,6 +511,7 @@ export function App() {
                   </div>
                 </div>
               )}
+              {editingStepsId !== wf.id && (
               <div className="wf-actions">
                 <button
                   className="primary small"
@@ -515,6 +524,15 @@ export function App() {
                   }}
                 >
                   Run
+                </button>
+                <button
+                  className="ghost small"
+                  onClick={() => {
+                    setEditingStepsId(wf.id);
+                    setDraftSteps(wf.steps);
+                  }}
+                >
+                  Edit
                 </button>
                 <button
                   className="ghost small"
@@ -536,10 +554,90 @@ export function App() {
                   Delete
                 </button>
               </div>
+              )}
             </div>
           ))}
         </section>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step editor: delete recorded steps and insert natural-language AI steps for
+// dynamic actions ("select last month") that can't be a fixed click.
+// ---------------------------------------------------------------------------
+
+function StepEditor({
+  steps,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  steps: Step[];
+  onChange: (steps: Step[]) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const insertAgent = (at: number) => {
+    const next = [...steps];
+    next.splice(at, 0, { type: 'agent', goal: '' });
+    onChange(next);
+  };
+  const removeAt = (at: number) => onChange(steps.filter((_, i) => i !== at));
+  const setGoal = (at: number, goal: string) =>
+    onChange(steps.map((s, i) => (i === at && s.type === 'agent' ? { ...s, goal } : s)));
+
+  const insertRow = (at: number) => (
+    <button className="link insert-ai" onClick={() => insertAgent(at)}>
+      ＋ AI instruction
+    </button>
+  );
+
+  return (
+    <div className="step-editor">
+      <h2>Edit steps</h2>
+      <p className="hint">
+        Delete recorded steps, or insert an AI instruction for a dynamic action
+        (e.g. &ldquo;in the open date picker, go to last month and select the
+        1st to the last day&rdquo;). The AI sees a screenshot of the page while
+        it works.
+      </p>
+      <ol className="steps editing">
+        {insertRow(0)}
+        {steps.map((s, i) => (
+          <li key={i} className={s.type === 'agent' ? 'agent-step' : ''}>
+            <div className="step-row">
+              {s.type === 'agent' ? (
+                <textarea
+                  className="agent-goal"
+                  placeholder="Describe the action for the AI…"
+                  value={s.goal}
+                  onChange={(e) => setGoal(i, e.target.value)}
+                />
+              ) : (
+                <span className="step-text">{stepLabel(s)}</span>
+              )}
+              <button
+                className="ghost small danger"
+                title="Delete step"
+                onClick={() => removeAt(i)}
+              >
+                ✕
+              </button>
+            </div>
+            {insertRow(i + 1)}
+          </li>
+        ))}
+      </ol>
+      <div className="row">
+        <button className="primary" onClick={onSave}>
+          Save
+        </button>
+        <button className="ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

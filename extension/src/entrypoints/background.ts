@@ -1,4 +1,5 @@
-import { describeAiError, healStep } from '@/utils/ai';
+import { describeAiError, healStep, recoveryGoal, runAgentStep } from '@/utils/ai';
+import { ANTHROPIC_API_KEY } from '@/utils/env';
 import {
   FE_URL,
   deleteWorkflowRemote,
@@ -9,6 +10,8 @@ import {
 } from '@/utils/fe';
 import type {
   Account,
+  AgentAction,
+  AgentSnapshot,
   ContentMessage,
   ElementStep,
   ExecResult,
@@ -123,12 +126,8 @@ export default defineBackground(() => {
   };
 
   const panelState = async (): Promise<PanelState> => {
-    const [rec, workflows, settings] = await Promise.all([
-      getRec(),
-      listWorkflows(),
-      getSettings(),
-    ]);
-    return { rec, run, workflows, hasApiKey: Boolean(settings.apiKey) };
+    const [rec, workflows] = await Promise.all([getRec(), listWorkflows()]);
+    return { rec, run, workflows };
   };
 
   // ---------------------------------------------------------------------------
@@ -399,9 +398,9 @@ export default defineBackground(() => {
     }
 
     const settings = await getSettings();
-    if (!settings.apiKey) {
+    if (!ANTHROPIC_API_KEY) {
       throw new Error(
-        `element not found: ${step.target.intent}. Add an Anthropic API key in Settings to let AI repair this step.`,
+        `element not found: ${step.target.intent}. This build has no Anthropic API key, so AI repair is unavailable (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
       );
     }
 
@@ -417,9 +416,11 @@ export default defineBackground(() => {
       throw new Error(`element not found and AI repair failed: ${describeAiError(err)}`);
     }
     if (verdict.match == null) {
-      throw new Error(
-        `element not found: ${step.target.intent}. AI could not find an equivalent element (${verdict.reason}).`,
-      );
+      // The cheap text healer is out of its depth (typical for visual widgets
+      // like date pickers). Escalate to the vision agent, scoped to just this
+      // one action; the workflow itself is left unchanged.
+      await recoverStepWithAgent(step, tabId, verdict.reason, stepIndex);
+      return;
     }
 
     const healed = await execInTab(tabId, {
@@ -442,6 +443,96 @@ export default defineBackground(() => {
       workflow.updatedAt = Date.now();
       await saveWorkflow(workflow);
       pushIfSignedIn(workflow);
+    }
+    if (run) {
+      run.healedSteps = [...run.healedSteps, stepIndex];
+      broadcast();
+    }
+  };
+
+  // Screenshot of the (active) run tab, downscaled so 1 image px == 1 CSS px
+  // — candidate rects and click_at coordinates then line up with the image.
+  // Null on any failure: the agent turn proceeds text-only rather than dying.
+  const captureTab = async (tabId: number, dpr: number): Promise<string | null> => {
+    try {
+      const tab = await browser.tabs.get(tabId);
+      if (tab.windowId == null) return null;
+      const dataUrl = await browser.tabs.captureVisibleTab(tab.windowId, {
+        format: 'jpeg',
+        quality: 70,
+      });
+      const bmp = await createImageBitmap(await (await fetch(dataUrl)).blob());
+      // 8000px is the API's hard limit; 1/dpr is the 1:1-CSS-px scale.
+      const scale = Math.min(1 / (dpr || 1), 8000 / Math.max(bmp.width, bmp.height));
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = new OffscreenCanvas(w, h);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(bmp, 0, 0, w, h);
+      const out = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.7 });
+      const bytes = new Uint8Array(await out.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(bin);
+    } catch {
+      return null;
+    }
+  };
+
+  // Run a dynamic `agent` step: hand the goal + live page (screenshot + DOM
+  // snapshot) to Claude, which observes and acts until the goal is met.
+  const runAgentStepInTab = async (goal: string, tabId: number): Promise<void> => {
+    const settings = await getSettings();
+    if (!ANTHROPIC_API_KEY) {
+      throw new Error(
+        `This AI step ("${goal}") needs an Anthropic API key, but this build has none (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
+      );
+    }
+    const observe = () =>
+      browser.tabs.sendMessage(tabId, { kind: 'agent.snapshot' }) as Promise<AgentSnapshot>;
+    const act = async (action: AgentAction) => {
+      const res = (await browser.tabs.sendMessage(tabId, {
+        kind: 'agent.act',
+        action,
+      })) as ExecResult;
+      return res.ok ? { ok: true } : { ok: false, error: 'error' in res ? res.error : 'failed' };
+    };
+    const capture = (dpr: number) => captureTab(tabId, dpr);
+
+    let result;
+    try {
+      result = await runAgentStep(settings, goal, new Date(), observe, act, capture, (note) => {
+        if (cancelRequested) return;
+        setRunStatus({ agentNote: note });
+      });
+    } catch (err) {
+      throw new Error(`AI step failed: ${describeAiError(err)}`);
+    } finally {
+      setRunStatus({ agentNote: undefined });
+    }
+    if (!result.success) {
+      throw new Error(`AI step could not complete: ${result.note}`);
+    }
+  };
+
+  // Vision-agent recovery for one failed recorded step. Runs only after the
+  // text healer gave up; completes the action without touching the workflow.
+  const recoverStepWithAgent = async (
+    step: ElementStep,
+    tabId: number,
+    healReason: string,
+    stepIndex: number,
+  ): Promise<void> => {
+    try {
+      await runAgentStepInTab(recoveryGoal(step), tabId);
+    } catch (err) {
+      throw new Error(
+        `element not found: ${step.target.intent}. Text repair failed (${healReason}) ` +
+          `and the vision agent could not complete it either: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     if (run) {
       run.healedSteps = [...run.healedSteps, stepIndex];
@@ -604,6 +695,11 @@ export default defineBackground(() => {
               if (!fast) await sleep(400);
               break;
             }
+            case 'agent': {
+              await runAgentStepInTab(step.goal, tabId);
+              if (!fast) await sleep(400);
+              break;
+            }
       }
     }
   };
@@ -711,6 +807,17 @@ export default defineBackground(() => {
               const wf = await getWorkflow(msg.id);
               if (wf) {
                 wf.name = msg.name.trim() || wf.name;
+                wf.updatedAt = Date.now();
+                await saveWorkflow(wf);
+                pushIfSignedIn(wf);
+                broadcast();
+              }
+              return { ok: true };
+            }
+            case 'panel.updateWorkflowSteps': {
+              const wf = await getWorkflow(msg.id);
+              if (wf) {
+                wf.steps = msg.steps;
                 wf.updatedAt = Date.now();
                 await saveWorkflow(wf);
                 pushIfSignedIn(wf);

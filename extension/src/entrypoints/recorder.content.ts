@@ -1,5 +1,11 @@
 import { attachRecorder } from '@/utils/recorder';
-import { execCandidate, execStep, highlightTarget } from '@/utils/replayer';
+import {
+  agentAct,
+  agentSnapshot,
+  execCandidate,
+  execStep,
+  highlightTarget,
+} from '@/utils/replayer';
 import { cursorHide } from '@/utils/cursor';
 import { matchesFrame } from '@/utils/selectors';
 import type { BgToContentMessage, ExecResult, Step } from '@/utils/types';
@@ -76,6 +82,19 @@ export default defineContentScript({
           case 'replay.cursorHide': {
             cursorHide();
             return false;
+          }
+          case 'agent.snapshot': {
+            // Agent operates on the top frame only (v1).
+            if (window.top !== window) return false;
+            sendResponse(agentSnapshot());
+            return false;
+          }
+          case 'agent.act': {
+            if (window.top !== window) return false;
+            void agentAct(msg.action).then((result: ExecResult) =>
+              sendResponse(result),
+            );
+            return true;
           }
           case 'replay.exec': {
             const target = 'target' in msg.step ? msg.step.target : undefined;

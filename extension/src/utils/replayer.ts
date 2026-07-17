@@ -1,6 +1,8 @@
 import { cursorHide, cursorMoveTo, cursorPulse, highlightElement } from './cursor';
 import { generateSelectors, isVisible, trySelector, visibleText } from './selectors';
 import type {
+  AgentAction,
+  AgentSnapshot,
   Candidate,
   ElementStep,
   ExecResult,
@@ -161,24 +163,76 @@ const INTERACTIVE_SELECTOR =
 
 let lastCandidates: Element[] = [];
 
-export const collectCandidates = (): Candidate[] => {
-  const els = Array.from(document.querySelectorAll(INTERACTIVE_SELECTOR))
-    .filter(isVisible)
-    .slice(0, 120);
+const describe = (els: Element[], withRects = false): Candidate[] => {
   lastCandidates = els;
   return els.map((el, index) => {
     const attrs: Record<string, string> = {};
-    for (const a of ['id', 'name', 'aria-label', 'placeholder', 'type', 'href', 'role', 'title']) {
+    // `class` is included so the agent can tell otherwise-identical controls
+    // apart (e.g. a date picker's prev/next arrow svgs).
+    for (const a of ['id', 'name', 'aria-label', 'placeholder', 'type', 'href', 'role', 'title', 'class']) {
       const v = el.getAttribute(a);
       if (v) attrs[a] = v.slice(0, 80);
     }
-    return {
+    const c: Candidate = {
       index,
       tag: el.tagName.toLowerCase(),
       text: visibleText(el).slice(0, 80),
       attrs,
     };
+    if (withRects) {
+      const r = el.getBoundingClientRect();
+      c.rect = {
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        w: Math.round(r.width),
+        h: Math.round(r.height),
+      };
+    }
+    return c;
   });
+};
+
+export const collectCandidates = (): Candidate[] =>
+  describe(Array.from(document.querySelectorAll(INTERACTIVE_SELECTOR)).filter(isVisible).slice(0, 120));
+
+// Broader than INTERACTIVE_SELECTOR: the agent must see attribute-poor
+// controls too — calendar arrows (bare <svg> with cursor:pointer), custom
+// widgets, icon buttons. Anything with a click affordance is fair game.
+const AGENT_SELECTOR =
+  INTERACTIVE_SELECTOR + ', svg, [role], [tabindex], [aria-label]';
+
+const hasClickAffordance = (el: Element): boolean => {
+  if (el.matches(INTERACTIVE_SELECTOR)) return true;
+  if (el.getAttribute('role') || el.getAttribute('aria-label')) return true;
+  const ti = el.getAttribute('tabindex');
+  if (ti && ti !== '-1') return true;
+  // cursor:pointer on the element or its immediate parent is the usual tell
+  // for a React-handled clickable that carries no DOM attribute.
+  try {
+    if (getComputedStyle(el as HTMLElement).cursor === 'pointer') return true;
+    const p = el.parentElement;
+    if (p && getComputedStyle(p).cursor === 'pointer') return true;
+  } catch {
+    // getComputedStyle can throw on detached nodes
+  }
+  return false;
+};
+
+export const agentSnapshot = (): AgentSnapshot => {
+  const els = Array.from(document.querySelectorAll(AGENT_SELECTOR))
+    .filter((el) => isVisible(el) && hasClickAffordance(el))
+    .slice(0, 150);
+  return {
+    candidates: describe(els, true),
+    pageText: (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 3000),
+    title: document.title,
+    url: location.href,
+    viewport: {
+      w: window.innerWidth,
+      h: window.innerHeight,
+      dpr: window.devicePixelRatio || 1,
+    },
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -272,6 +326,55 @@ export const execCandidate = async (
     }
     await performOn(el, step, fast);
     return { ok: true, healedSelectors: generateSelectors(el) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+// Execute one agent action. Index actions target a candidate from the last
+// agentSnapshot() sweep; clickAt targets a screenshot coordinate (elements
+// the sweep missed). Reuses the same visible click/type machinery as replay.
+export const agentAct = async (action: AgentAction): Promise<ExecResult> => {
+  try {
+    if (action.kind === 'scroll') {
+      window.scrollBy({ top: action.dy, behavior: 'smooth' });
+      await sleep(450);
+      return { ok: true };
+    }
+    if (action.kind === 'clickAt') {
+      const hit = document.elementFromPoint(action.x, action.y);
+      if (!hit) {
+        return { ok: false, error: `nothing at (${action.x}, ${action.y})` };
+      }
+      // Climb to the nearest conventional control; the raw hit is often a
+      // text node's span inside the real clickable.
+      const el = (hit.closest?.(INTERACTIVE_SELECTOR) as Element | null) ?? hit;
+      const { x, y } = await glideToElement(el, false);
+      cursorPulse(x, y);
+      (el as HTMLElement).focus?.();
+      dispatchClick(el, x, y);
+      cursorHide();
+      return { ok: true };
+    }
+
+    const el = lastCandidates[action.index];
+    if (!el || !el.isConnected) {
+      return { ok: false, error: `element [${action.index}] is no longer on the page` };
+    }
+    const { x, y } = await glideToElement(el, false);
+    if (action.kind === 'click') {
+      cursorPulse(x, y);
+      (el as HTMLElement).focus?.();
+      dispatchClick(el, x, y);
+    } else if (action.kind === 'type') {
+      await typeInto(el, action.text, false);
+    } else {
+      cursorPulse(x, y);
+      (el as HTMLElement).focus?.();
+      dispatchKey(el, action.key);
+    }
+    cursorHide();
+    return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

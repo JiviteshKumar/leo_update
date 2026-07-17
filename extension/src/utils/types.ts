@@ -40,7 +40,11 @@ export type Step =
   // Plain printable typing is captured as `type` steps, not here.
   | { type: 'key'; key: string; mods?: KeyMods; target?: TargetInfo }
   // A file download happened here. Replay waits for it to complete.
-  | { type: 'download' };
+  | { type: 'download' }
+  // A natural-language goal achieved by the AI agent at run time. For dynamic
+  // actions that can't be a fixed click — "select last month", "pick the first
+  // available slot". Authored by the user, not recorded.
+  | { type: 'agent'; goal: string };
 
 export type ElementStep = Extract<
   Step,
@@ -92,14 +96,17 @@ export interface RunState {
   error?: string;
   // Step indexes the AI healer repaired during this run.
   healedSteps: number[];
+  // Live activity of a running `agent` step, shown in the run card.
+  agentNote?: string;
 }
 
 // Replay pacing. 'verbose' mirrors a human user (cursor glide, per-key
 // typing, pauses between steps); 'agent' does everything as fast as possible.
 export type RunSpeed = 'verbose' | 'agent';
 
+// The Anthropic API key is not a setting: it's baked in at build time from
+// extension/.env (see src/utils/env.ts).
 export interface Settings {
-  apiKey: string;
   model: string;
   cursorColor: string;
   speed: RunSpeed;
@@ -132,7 +139,36 @@ export interface Candidate {
   tag: string;
   text: string;
   attrs: Record<string, string>;
+  // Viewport-relative bounding box in CSS px. Filled by agentSnapshot() so
+  // the vision agent can correlate candidates with the screenshot; the
+  // text-only healer path leaves it unset.
+  rect?: { x: number; y: number; w: number; h: number };
 }
+
+// ---------------------------------------------------------------------------
+// AI agent (dynamic `agent` steps + failed-step recovery)
+// ---------------------------------------------------------------------------
+
+// What the agent observes each turn: the numbered interactive elements it can
+// act on (by index), plus page text for context (dates, month labels, …).
+export interface AgentSnapshot {
+  candidates: Candidate[];
+  pageText: string;
+  title: string;
+  url: string;
+  // Screenshots are downscaled to CSS-px size, so candidate rects and
+  // click_at coordinates line up 1:1 with image pixels.
+  viewport: { w: number; h: number; dpr: number };
+}
+
+// An action the agent takes: on a candidate by its snapshot index, at a
+// screenshot coordinate (elements the DOM sweep missed), or a page scroll.
+export type AgentAction =
+  | { kind: 'click'; index: number }
+  | { kind: 'type'; index: number; text: string }
+  | { kind: 'key'; index: number; key: string }
+  | { kind: 'clickAt'; x: number; y: number }
+  | { kind: 'scroll'; dy: number };
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -158,7 +194,10 @@ export type PanelMessage =
   | { kind: 'panel.getAccount'; refresh?: boolean }
   // Opens the fe app in a tab so the user can sign in with Google there.
   | { kind: 'panel.signIn' }
-  | { kind: 'panel.signOut' };
+  | { kind: 'panel.signOut' }
+  // Replace a saved workflow's steps (the step editor: delete steps, insert
+  // AI-instruction steps).
+  | { kind: 'panel.updateWorkflowSteps'; id: string; steps: Step[] };
 
 export type ContentMessage =
   | { kind: 'rec.step'; step: Step; replaceLastClicks?: number }
@@ -170,6 +209,10 @@ export type BgToContentMessage =
   | { kind: 'replay.execCandidate'; index: number; step: ElementStep; fast?: boolean }
   | { kind: 'replay.highlight'; target: TargetInfo }
   | { kind: 'replay.cursorHide' }
+  // Agent step: snapshot the page, or act on a candidate by index. Handled by
+  // the top frame only.
+  | { kind: 'agent.snapshot' }
+  | { kind: 'agent.act'; action: AgentAction }
   | { kind: 'rec.attach' }
   | { kind: 'rec.detach' }
   // Presence check for the floating-menu content script. Visibility itself is
@@ -187,7 +230,6 @@ export interface PanelState {
   rec: RecState | null;
   run: RunState | null;
   workflows: Workflow[];
-  hasApiKey: boolean;
 }
 
 export const STATE_UPDATE = 'leo.stateUpdate';

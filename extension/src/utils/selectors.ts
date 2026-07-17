@@ -5,7 +5,11 @@ import type { TargetInfo } from './types';
 const looksGenerated = (id: string): boolean =>
   /[0-9a-f]{6,}/i.test(id) || /\d{3,}/.test(id) || /^:/.test(id) || id.length > 40;
 
+// CSS.escape is for identifiers (ids, class names). For a value inside a
+// quoted attribute selector only the quote and backslash need escaping —
+// using CSS.escape there would mangle spaces, '#', etc. into '\ ' / '\#'.
 const cssEscape = (v: string): string => CSS.escape(v);
+const attrValue = (v: string): string => v.replace(/["\\]/g, '\\$&');
 
 const isUnique = (selector: string): boolean => {
   try {
@@ -13,6 +17,39 @@ const isUnique = (selector: string): boolean => {
   } catch {
     return false;
   }
+};
+
+// Class tokens that read as human-authored hooks (calendar-icon, datepicker)
+// rather than utilities (w-4), hashes (css-1a2b3c) or CSS-module names
+// (Button_root__x7f9). Digits/underscores are the usual tell for the churny
+// ones, so we keep letter/hyphen tokens of a reasonable length.
+const isStableClass = (c: string): boolean =>
+  c.length >= 4 && c.length <= 30 && /^[a-z][a-z-]+$/i.test(c);
+
+// Attributes that identify an element the way a human would recognise it.
+// data-testid & friends first (test hooks), then a11y/name attributes; the
+// generic data-* sweep in generateSelectors covers app-specific ones.
+const ANCHOR_ATTRS = [
+  'data-testid',
+  'data-test',
+  'data-qa',
+  'data-cy',
+  'data-id',
+  'aria-label',
+  'name',
+];
+
+// A selector that pins `el` on its own, if it carries a stable identifier.
+// Used both to emit a direct selector and to anchor positional paths so they
+// stop at the nearest recognisable ancestor instead of the document root.
+const stableAnchor = (el: Element): string | null => {
+  const tag = el.tagName.toLowerCase();
+  if (el.id && !looksGenerated(el.id)) return `#${cssEscape(el.id)}`;
+  for (const attr of ANCHOR_ATTRS) {
+    const v = el.getAttribute(attr);
+    if (v && !looksGenerated(v)) return `${tag}[${attr}="${attrValue(v)}"]`;
+  }
+  return null;
 };
 
 export const visibleText = (el: Element): string => {
@@ -45,16 +82,21 @@ export const fieldLabel = (el: Element): string => {
   );
 };
 
-const nthOfTypePath = (el: Element, maxDepth = 8): string => {
+const nthOfTypePath = (el: Element, maxDepth = 10): string => {
   const segments: string[] = [];
   let node: Element | null = el;
   while (node && node !== document.body && segments.length < maxDepth) {
     const tag = node.tagName.toLowerCase();
     const parent: Element | null = node.parentElement;
-    // An ancestor with a usable id anchors the path and keeps it short.
-    if (node !== el && node.id && !looksGenerated(node.id)) {
-      segments.unshift(`#${cssEscape(node.id)}`);
-      break;
+    // Any ancestor with a stable identifier (id, data-testid, aria-label, …)
+    // anchors the path: everything above it is dropped, so unrelated DOM
+    // churn higher in the tree can't break the selector.
+    if (node !== el) {
+      const anchor = stableAnchor(node);
+      if (anchor) {
+        segments.unshift(anchor);
+        break;
+      }
     }
     if (!parent) {
       segments.unshift(tag);
@@ -70,6 +112,22 @@ const nthOfTypePath = (el: Element, maxDepth = 8): string => {
   return segments.join(' > ');
 };
 
+// A lenient anchor→element selector: the nearest stable ancestor plus the
+// element's tag joined by a descendant combinator (`[data-x] svg`). Survives
+// intermediate wrapper changes that a child-combinator path would not.
+const anchoredDescendant = (el: Element, maxUp = 6): string | null => {
+  const tag = el.tagName.toLowerCase();
+  let node: Element | null = el.parentElement;
+  let depth = 0;
+  while (node && node !== document.body && depth < maxUp) {
+    const anchor = stableAnchor(node);
+    if (anchor) return `${anchor} ${tag}`;
+    node = node.parentElement;
+    depth += 1;
+  }
+  return null;
+};
+
 // Ranked candidate selectors for an element. Unique matches at record time
 // rank first; the `:text=` pseudo (same convention the replayer resolves) is
 // the resilient fallback when attributes churn.
@@ -79,23 +137,58 @@ export const generateSelectors = (el: Element): string[] => {
 
   if (el.id && !looksGenerated(el.id)) raw.push(`#${cssEscape(el.id)}`);
 
+  // Test hooks: the most stable identifiers there are. Tag-qualified so a
+  // reused value on a different element type still disambiguates.
   for (const attr of ['data-testid', 'data-test', 'data-qa', 'data-cy']) {
     const v = el.getAttribute(attr);
-    if (v) raw.push(`[${attr}="${cssEscape(v)}"]`);
+    if (v) raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
   }
 
   for (const attr of ['name', 'aria-label', 'placeholder']) {
     const v = el.getAttribute(attr);
-    if (v) raw.push(`${tag}[${attr}="${cssEscape(v)}"]`);
+    if (v) raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
   }
 
-  const type = el.getAttribute('type');
-  if (tag === 'input' && type) raw.push(`input[type="${cssEscape(type)}"]`);
+  // Every other app-specific data-* attribute (data-icon, data-action, …),
+  // plus a11y/semantic attributes. These are how icons and other
+  // attribute-poor controls are usually recognisable.
+  for (const attr of el.getAttributeNames()) {
+    if (
+      attr.startsWith('data-') &&
+      !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(attr)
+    ) {
+      const v = el.getAttribute(attr);
+      if (v && v.length <= 40 && !looksGenerated(v)) {
+        raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
+      }
+    }
+  }
+  for (const attr of ['role', 'title', 'alt', 'type']) {
+    const v = el.getAttribute(attr);
+    if (v && (attr !== 'type' || tag === 'input')) {
+      raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
+    }
+  }
+
+  // Stable class hooks, combined for specificity (svg.calendar-icon.large).
+  const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3);
+  if (classes.length) {
+    raw.push(`${tag}${classes.map((c) => `.${cssEscape(c)}`).join('')}`);
+  }
+
+  // Icon sprites: <svg> whose <use> points at a named symbol (#icon-calendar).
+  if (tag === 'svg') {
+    const use = el.querySelector('use');
+    const href = use?.getAttribute('href') ?? use?.getAttribute('xlink:href');
+    if (href && href.startsWith('#') && !looksGenerated(href)) {
+      raw.push(`svg:has(use[href="${attrValue(href)}"])`);
+    }
+  }
 
   if (tag === 'a') {
     const href = el.getAttribute('href');
     if (href && href !== '#' && !href.startsWith('javascript:')) {
-      raw.push(`a[href="${cssEscape(href)}"]`);
+      raw.push(`a[href="${attrValue(href)}"]`);
     }
   }
 
@@ -107,11 +200,15 @@ export const generateSelectors = (el: Element): string[] => {
     raw.push(`[role="button"]:text=${text.slice(0, 40)}`);
   }
 
+  // Anchor a lenient and a precise path on the nearest identifiable ancestor,
+  // then the whole-tree positional path as the last resort.
+  const anchored = anchoredDescendant(el);
+  if (anchored) raw.push(anchored);
   raw.push(nthOfTypePath(el));
 
   const unique = raw.filter((s) => !s.includes(':text=') && isUnique(s));
   const rest = raw.filter((s) => !unique.includes(s));
-  return [...new Set([...unique, ...rest])].slice(0, 8);
+  return [...new Set([...unique, ...rest])].slice(0, 10);
 };
 
 const frameParentPath = (): string[] => {
