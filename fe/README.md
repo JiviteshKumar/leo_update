@@ -1,6 +1,7 @@
 # Leo fe
 
-Next.js app for Leo accounts: authentication (better-auth, Google OAuth) and
+Next.js app for Leo accounts: authentication (better-auth — email/password
+and Google OAuth) and
 cloud sync of recorded workflows, backed by Neon Postgres via Drizzle and
 server actions.
 

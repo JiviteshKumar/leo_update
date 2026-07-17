@@ -84,10 +84,37 @@ export function App() {
     setTimeout(() => setFlash(null), 5000);
   };
 
-  if (!state) {
+  // account === undefined means the first session check hasn't answered yet;
+  // render the bare shell instead of flashing the sign-in gate.
+  if (!state || account === undefined) {
     return (
       <div className="shell">
         <header className="header"><span className="brand">Leo</span></header>
+      </div>
+    );
+  }
+
+  // Signed-out gate: every feature requires a Leo Cloud account. The
+  // background picks the session up on its own once sign-in completes in
+  // the opened tab, which lifts this gate automatically.
+  if (account === null) {
+    return (
+      <div className="shell">
+        <header className="header">
+          <span className="brand">Leo</span>
+          <span className="tagline">Teach your browser a task once.</span>
+        </header>
+        <section className="card">
+          <h2>Sign in to get started</h2>
+          <p className="hint">
+            Leo needs a Leo Cloud account to record, run and sync your
+            workflows. Signing in opens the Leo web app in a new tab &mdash;
+            once you&apos;re done, this panel unlocks by itself.
+          </p>
+          <button className="primary" onClick={() => void send({ kind: 'panel.signIn' })}>
+            Sign in
+          </button>
+        </section>
       </div>
     );
   }
@@ -114,39 +141,22 @@ export function App() {
         </header>
         <section className="card">
           <h2>Leo Cloud</h2>
-          {account ? (
-            <>
-              <p className="hint">
-                Signed in as <strong>{account.email}</strong>
-              </p>
-              <div className="row">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setAccount(null);
-                    void send({ kind: 'panel.signOut' });
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="hint">
-                Sign in to sync your workflows across devices. Opens the Leo web
-                app; you&apos;ll be back here in a moment.
-              </p>
-              <div className="row">
-                <button
-                  className="primary"
-                  onClick={() => void send({ kind: 'panel.signIn' })}
-                >
-                  Sign in with Google
-                </button>
-              </div>
-            </>
-          )}
+          {/* The signed-out case never reaches this screen: the gate in the
+              main render path replaces the whole panel until signed in. */}
+          <p className="hint">
+            Signed in as <strong>{account.email}</strong>
+          </p>
+          <div className="row">
+            <button
+              className="ghost"
+              onClick={() => {
+                setAccount(null);
+                void send({ kind: 'panel.signOut' });
+              }}
+            >
+              Sign out
+            </button>
+          </div>
         </section>
         <section className="card">
           <label className="field">
@@ -431,15 +441,6 @@ export function App() {
             </section>
           )}
 
-          {account === null && (
-            <p className="hint">
-              Not signed in &mdash;{' '}
-              <button className="link" onClick={() => void send({ kind: 'panel.signIn' })}>
-                sign in
-              </button>{' '}
-              to sync your workflows.
-            </p>
-          )}
         </>
       )}
 
