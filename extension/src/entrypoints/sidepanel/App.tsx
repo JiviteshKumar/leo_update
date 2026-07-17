@@ -233,8 +233,8 @@ export function App() {
       )}
       {run.status === 'step-failed' && (
         <p className="hint">
-          This step could not complete. Skip it and continue with the rest of the
-          workflow, or end the run here.
+          This step could not complete. Try it again, skip it and continue with
+          the rest of the workflow, or end the run here.
         </p>
       )}
       <div className="progress">
@@ -257,9 +257,14 @@ export function App() {
           </button>
         )}
         {run.status === 'step-failed' && (
-          <button className="primary" onClick={() => void send({ kind: 'panel.skipStep' })}>
-            Skip step
-          </button>
+          <>
+            <button className="primary" onClick={() => void send({ kind: 'panel.retryStep' })}>
+              Retry step
+            </button>
+            <button className="ghost" onClick={() => void send({ kind: 'panel.skipStep' })}>
+              Skip step
+            </button>
+          </>
         )}
         {running && (
           <button className="ghost" onClick={() => void send({ kind: 'panel.cancelRun' })}>

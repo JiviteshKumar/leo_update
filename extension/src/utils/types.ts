@@ -126,6 +126,8 @@ export type PanelMessage =
   | { kind: 'panel.dismissRun' }
   | { kind: 'panel.continueRun' }
   | { kind: 'panel.skipStep' }
+  // Re-run the step that just failed.
+  | { kind: 'panel.retryStep' }
   | { kind: 'panel.getSettings' }
   | { kind: 'panel.setSettings'; settings: Settings };
 

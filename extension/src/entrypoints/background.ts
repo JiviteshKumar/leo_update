@@ -35,8 +35,8 @@ export default defineBackground(() => {
   let run: RunState | null = null;
   let cancelRequested = false;
   let continueResolver: ((ok: boolean) => void) | null = null;
-  // Resolves the step-failed pause: true = skip the step, false = end the run.
-  let failureResolver: ((skip: boolean) => void) | null = null;
+  // Resolves the step-failed pause with the user's choice.
+  let failureResolver: ((choice: 'retry' | 'skip' | 'end') => void) | null = null;
   let keepalive: ReturnType<typeof setInterval> | null = null;
 
   const getRec = async (): Promise<RecState | null> => {
@@ -431,19 +431,24 @@ export default defineBackground(() => {
               setRunStatus({ status: 'cancelled' });
               return;
             }
-            // Pause instead of aborting: the user decides whether to skip
-            // this step or end the run here.
+            // Pause instead of aborting: the user decides whether to retry
+            // the step, skip it, or end the run here.
             setRunStatus({
               status: 'step-failed',
               error: err instanceof Error ? err.message : String(err),
             });
-            const skip = await new Promise<boolean>((resolve) => {
+            const choice = await new Promise<'retry' | 'skip' | 'end'>((resolve) => {
               failureResolver = resolve;
             });
             failureResolver = null;
-            if (!skip) {
+            if (choice === 'end') {
               setRunStatus({ status: 'error' });
               return;
+            }
+            if (choice === 'retry') {
+              // The for loop's i++ brings us back to the same step.
+              i--;
+              continue;
             }
           }
         }
@@ -548,7 +553,7 @@ export default defineBackground(() => {
     if (run && run.tabId === tabId && runActive()) {
       cancelRequested = true;
       continueResolver?.(false);
-      failureResolver?.(false);
+      failureResolver?.('end');
       setRunStatus({ status: 'cancelled' });
     }
   });
@@ -597,7 +602,7 @@ export default defineBackground(() => {
             case 'panel.cancelRun': {
               cancelRequested = true;
               continueResolver?.(false);
-              failureResolver?.(false);
+              failureResolver?.('end');
               return { ok: true };
             }
             case 'panel.dismissRun': {
@@ -614,7 +619,11 @@ export default defineBackground(() => {
               return { ok: true };
             }
             case 'panel.skipStep': {
-              failureResolver?.(true);
+              failureResolver?.('skip');
+              return { ok: true };
+            }
+            case 'panel.retryStep': {
+              failureResolver?.('retry');
               return { ok: true };
             }
             case 'panel.getSettings':
