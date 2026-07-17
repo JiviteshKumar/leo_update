@@ -7,9 +7,8 @@ import '@/ui/styles.css';
 
 // Leo's floating menu, injected into the top frame of every page inside a
 // shadow root (CSS isolation; events retarget to the <leo-ui> host so the
-// recorder ignores them). Visibility is driven by the background via
-// `ui.setVisible`; the initial state comes from the session flag so the menu
-// persists across navigations.
+// recorder ignores them). FloatingApp owns its own visibility by watching the
+// `leo:uiOpen` flag in storage.local, so this entrypoint just mounts it.
 export default defineContentScript({
   matches: ['<all_urls>'],
   cssInjectionMode: 'ui',
@@ -20,8 +19,17 @@ export default defineContentScript({
     // extension loaded); bail if a host is already present to avoid two menus.
     if (document.querySelector(LEO_UI_HOST)) return;
 
-    // React's setVisible, captured once the app mounts.
-    let setVisible: ((v: boolean) => void) | null = null;
+    // Answer the background's presence check so it doesn't re-inject a menu
+    // that already exists. Registered up front, before the async mount.
+    browser.runtime.onMessage.addListener(
+      (msg: BgToContentMessage, _sender, sendResponse) => {
+        if (msg.kind === 'ui.ping') {
+          sendResponse({ ok: true });
+          return true;
+        }
+        return false;
+      },
+    );
 
     const ui = await createShadowRootUi<Root>(ctx, {
       name: LEO_UI_HOST,
@@ -35,9 +43,7 @@ export default defineContentScript({
       isolateEvents: ['keydown', 'keyup', 'input', 'change', 'click'],
       onMount(container) {
         const root = createRoot(container);
-        root.render(
-          <FloatingApp registerSetVisible={(fn) => { setVisible = fn; }} />,
-        );
+        root.render(<FloatingApp />);
         return root;
       },
       onRemove(root) {
@@ -47,10 +53,8 @@ export default defineContentScript({
 
     ui.mount();
 
-    // FloatingApp restores its own initial visibility from the session flag;
-    // the background pushes later changes (toolbar toggle, run start).
-    browser.runtime.onMessage.addListener((msg: BgToContentMessage) => {
-      if (msg.kind === 'ui.setVisible') setVisible?.(msg.visible);
-    });
+    // On extension reload this script is orphaned; unmount the stale menu so
+    // its polling loop stops hitting the dead runtime.
+    ctx.onInvalidated(() => ui.remove());
   },
 });

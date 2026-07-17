@@ -4,8 +4,8 @@
   padding: 0;
 }
 
-/* The App renders inside .leo-root in both surfaces: the side-panel document
-   and the floating menu's shadow root (where :root / body don't apply). */
+/* The App renders inside .leo-root in the floating menu's shadow root, where
+   :root / body selectors don't apply — variables live on the wrapper. */
 .leo-root {
   color-scheme: dark;
   --bg: #101014;
@@ -21,23 +21,13 @@
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* Side-panel document background; the wrapper covers the viewport anyway. */
-body {
-  background: #101014;
-}
-
+/* App content; height is bounded by the floating card, which scrolls it. */
 .shell {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px;
   background: var(--bg);
-}
-
-/* Side panel fills its docked height; the floating card is height-bounded by
-   its container and scrolls internally. */
-.shell-panel {
-  min-height: 100vh;
 }
 
 .header {
@@ -437,8 +427,4 @@ h2 .dismiss:hover {
 /* When collapsed, drop the bar's bottom border so it reads as a pill. */
 .leo-float.collapsed .leo-float-bar {
   border-bottom: none;
-}
-
-.leo-float .shell {
-  min-height: 0;
 }

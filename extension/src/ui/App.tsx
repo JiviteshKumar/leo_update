@@ -13,8 +13,19 @@ const CURSOR_PRESETS = ['#4c8bf5', '#f5b301', '#e5484d', '#46a758', '#a855f7'];
 
 type View = 'new' | 'saved' | 'settings';
 
-const send = <T,>(msg: PanelMessage): Promise<T> =>
-  browser.runtime.sendMessage(msg) as Promise<T>;
+const send = <T,>(msg: PanelMessage): Promise<T> => {
+  // After the extension reloads, this content script is orphaned and
+  // runtime.sendMessage throws *synchronously* ("Extension context
+  // invalidated") — so a .catch() on the result wouldn't help. Swallow it and
+  // return a promise that never settles; the stale menu gets torn down by the
+  // content script's onInvalidated handler.
+  try {
+    if (!browser.runtime?.id) return new Promise<T>(() => {});
+    return browser.runtime.sendMessage(msg) as Promise<T>;
+  } catch {
+    return new Promise<T>(() => {});
+  }
+};
 
 const stepLabel = (step: Step): string => {
   switch (step.type) {
@@ -46,11 +57,7 @@ const stepLabel = (step: Step): string => {
   }
 };
 
-// Which surface the App is rendered in. Drives the header's surface-switch
-// button (float ⇄ side panel).
-type Surface = 'float' | 'panel';
-
-export function App({ surface = 'panel' }: { surface?: Surface }) {
+export function App() {
   const [state, setState] = useState<PanelState | null>(null);
   const [view, setView] = useState<View>('new');
   const [saveName, setSaveName] = useState('');
@@ -81,11 +88,22 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
       if (msg?.kind === STATE_UPDATE) refresh();
     };
     browser.runtime.onMessage.addListener(onMessage);
-    const poll = setInterval(refresh, 1500);
+    const poll = setInterval(() => {
+      // Stop polling once this content script is orphaned by a reload.
+      if (!browser.runtime?.id) {
+        clearInterval(poll);
+        return;
+      }
+      refresh();
+    }, 1500);
     void send<Settings>({ kind: 'panel.getSettings' }).then(setSettingsState).catch(() => {});
     return () => {
-      browser.runtime.onMessage.removeListener(onMessage);
       clearInterval(poll);
+      try {
+        browser.runtime.onMessage.removeListener(onMessage);
+      } catch {
+        // context already invalidated
+      }
     };
   }, [refresh]);
 
@@ -96,11 +114,12 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
   };
 
   // account === undefined means the first session check hasn't answered yet;
-  // render the bare shell instead of flashing the sign-in gate.
+  // show a brief loading state instead of flashing the sign-in gate.
   if (!state || account === undefined) {
     return (
-      <div className={`shell shell-${surface}`}>
+      <div className="shell">
         <header className="header"><span className="brand">Leo</span></header>
+        <p className="hint">Loading…</p>
       </div>
     );
   }
@@ -110,7 +129,7 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
   // the opened tab, which lifts this gate automatically.
   if (account === null) {
     return (
-      <div className={`shell shell-${surface}`}>
+      <div className="shell">
         <header className="header">
           <span className="brand">Leo</span>
           <span className="tagline">Teach your browser a task once.</span>
@@ -120,7 +139,7 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
           <p className="hint">
             Leo needs a Leo Cloud account to record, run and sync your
             workflows. Signing in opens the Leo web app in a new tab &mdash;
-            once you&apos;re done, this panel unlocks by itself.
+            once you&apos;re done, this menu unlocks by itself.
           </p>
           <button className="primary" onClick={() => void send({ kind: 'panel.signIn' })}>
             Sign in
@@ -143,7 +162,7 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
 
   if (view === 'settings') {
     return (
-      <div className={`shell shell-${surface}`}>
+      <div className="shell">
         <header className="header">
           <button className="ghost small" onClick={() => setView('new')}>
             &#8592; Back
@@ -153,7 +172,7 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
         <section className="card">
           <h2>Leo Cloud</h2>
           {/* The signed-out case never reaches this screen: the gate in the
-              main render path replaces the whole panel until signed in. */}
+              main render path replaces the whole menu until signed in. */}
           <p className="hint">
             Signed in as <strong>{account.email}</strong>
           </p>
@@ -340,21 +359,10 @@ export function App({ surface = 'panel' }: { surface?: Surface }) {
   );
 
   return (
-    <div className={`shell shell-${surface}`}>
+    <div className="shell">
       <header className="header">
         <span className="brand">Leo</span>
         <span className="tagline">Teach your browser a task once.</span>
-        <button
-          className="ghost small"
-          title={surface === 'float' ? 'Dock as side panel' : 'Show as floating menu'}
-          onClick={() =>
-            void send({
-              kind: surface === 'float' ? 'panel.openSidePanel' : 'panel.openFloating',
-            })
-          }
-        >
-          {surface === 'float' ? '⇥' : '❐'}
-        </button>
         <button className="ghost small" title="Settings" onClick={() => setView('settings')}>
           &#9881;
         </button>

@@ -158,11 +158,7 @@ export type PanelMessage =
   | { kind: 'panel.getAccount'; refresh?: boolean }
   // Opens the fe app in a tab so the user can sign in with Google there.
   | { kind: 'panel.signIn' }
-  | { kind: 'panel.signOut' }
-  // Surface switching: dock the floating menu into the side panel, or the
-  // reverse. Handled by the background.
-  | { kind: 'panel.openSidePanel' }
-  | { kind: 'panel.openFloating' };
+  | { kind: 'panel.signOut' };
 
 export type ContentMessage =
   | { kind: 'rec.step'; step: Step; replaceLastClicks?: number }
@@ -176,8 +172,11 @@ export type BgToContentMessage =
   | { kind: 'replay.cursorHide' }
   | { kind: 'rec.attach' }
   | { kind: 'rec.detach' }
-  // Show/hide the floating menu, driven by the toolbar icon / surface switch.
-  | { kind: 'ui.setVisible'; visible: boolean };
+  // Presence check for the floating-menu content script. Visibility itself is
+  // driven by a storage.local flag watched via storage.onChanged, not by
+  // messages — this only lets the background detect a tab that has no menu
+  // yet (opened before the extension loaded) so it can inject one.
+  | { kind: 'ui.ping' };
 
 export type ExecResult =
   | { ok: true; healedSelectors?: string[] }

@@ -5,6 +5,17 @@ const POS_KEY = 'leo:floatPos';
 const COLLAPSED_KEY = 'leo:floatCollapsed';
 const OPEN_KEY = 'leo:uiOpen';
 
+// Storage calls throw *synchronously* ("Extension context invalidated") once
+// this content script is orphaned by a reload; swallow so a stale menu never
+// raises an uncaught error before it's torn down.
+const quietStorage = (fn: () => Promise<unknown>): void => {
+  try {
+    void fn().catch(() => {});
+  } catch {
+    // context already invalidated
+  }
+};
+
 interface Pos {
   right: number;
   bottom: number;
@@ -12,45 +23,55 @@ interface Pos {
 const DEFAULT_POS: Pos = { right: 16, bottom: 16 };
 
 // The floating menu: a draggable, collapsible card wrapping the shared App.
-// The content script drives visibility via `registerSetVisible`; this
-// component is the sole writer of the `leo:uiOpen` session flag, so the menu
-// re-appears (or stays hidden) across navigations to match its last state.
-export function FloatingApp({
-  registerSetVisible,
-}: {
-  registerSetVisible: (fn: (visible: boolean) => void) => void;
-}) {
+// Visibility is a single global flag in storage.local. This component reads it
+// on mount and watches storage.onChanged, so the toolbar toggle (a one-line
+// flag write in the background) shows/hides the menu on every tab at once —
+// no messaging, no mount-timing races, works the same on any site.
+export function FloatingApp() {
   const [visible, setVisibleState] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [pos, setPos] = useState<Pos>(DEFAULT_POS);
   const drag = useRef<{ startX: number; startY: number; base: Pos } | null>(null);
   const [dragging, setDragging] = useState(false);
 
+  // The close button writes the shared flag so it hides everywhere.
   const setVisible = useCallback((v: boolean) => {
     setVisibleState(v);
-    void browser.storage.session.set({ [OPEN_KEY]: v }).catch(() => {});
+    quietStorage(() => browser.storage.local.set({ [OPEN_KEY]: v }));
   }, []);
 
-  // Restore persisted position + collapsed state, and last visibility (the
-  // session flag survives navigations so the menu stays open across them).
+  // Restore persisted position + collapsed state and the current visibility.
   useEffect(() => {
-    void browser.storage.local.get([POS_KEY, COLLAPSED_KEY]).then((res) => {
-      const p = res[POS_KEY] as Pos | undefined;
-      if (p && typeof p.right === 'number' && typeof p.bottom === 'number') setPos(p);
-      if (res[COLLAPSED_KEY]) setCollapsed(true);
-    });
-    void browser.storage.session
-      .get(OPEN_KEY)
-      .then((res) => {
+    quietStorage(() =>
+      browser.storage.local.get([POS_KEY, COLLAPSED_KEY, OPEN_KEY]).then((res) => {
+        const p = res[POS_KEY] as Pos | undefined;
+        if (p && typeof p.right === 'number' && typeof p.bottom === 'number') setPos(p);
+        if (res[COLLAPSED_KEY]) setCollapsed(true);
         if (res[OPEN_KEY]) setVisibleState(true);
-      })
-      .catch(() => {});
+      }),
+    );
   }, []);
 
-  // Let the content script push visibility (toolbar toggle, run start, …).
+  // React to the shared visibility flag flipping (toolbar toggle, run start,
+  // or a close on another tab).
   useEffect(() => {
-    registerSetVisible((v) => setVisibleState(v));
-  }, [registerSetVisible]);
+    const onChanged = (
+      changes: Record<string, { newValue?: unknown }>,
+      area: string,
+    ) => {
+      if (area === 'local' && OPEN_KEY in changes) {
+        setVisibleState(Boolean(changes[OPEN_KEY].newValue));
+      }
+    };
+    browser.storage.onChanged.addListener(onChanged);
+    return () => {
+      try {
+        browser.storage.onChanged.removeListener(onChanged);
+      } catch {
+        // context already invalidated
+      }
+    };
+  }, []);
 
   const onDragMove = useCallback((e: PointerEvent) => {
     const d = drag.current;
@@ -68,7 +89,7 @@ export function FloatingApp({
     window.removeEventListener('pointermove', onDragMove);
     window.removeEventListener('pointerup', onDragEnd);
     setPos((p) => {
-      void browser.storage.local.set({ [POS_KEY]: p });
+      quietStorage(() => browser.storage.local.set({ [POS_KEY]: p }));
       return p;
     });
   }, [onDragMove]);
@@ -84,7 +105,7 @@ export function FloatingApp({
 
   const toggleCollapsed = () => {
     setCollapsed((c) => {
-      void browser.storage.local.set({ [COLLAPSED_KEY]: !c });
+      quietStorage(() => browser.storage.local.set({ [COLLAPSED_KEY]: !c }));
       return !c;
     });
   };
@@ -107,7 +128,7 @@ export function FloatingApp({
         </button>
       </div>
       <div className="leo-float-body">
-        <App surface="float" />
+        <App />
       </div>
     </div>
   );

@@ -36,11 +36,6 @@ const UI_OPEN_KEY = 'leo:uiOpen';
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export default defineBackground(() => {
-  // The floating menu (a content script) reads/writes storage.session; grant
-  // untrusted contexts access (defaults to trusted-only on each SW start).
-  void browser.storage.session
-    .setAccessLevel?.({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' })
-    .catch(() => {});
   // -------------------------------------------------------------------------
   // Shared state
   // -------------------------------------------------------------------------
@@ -492,8 +487,11 @@ export default defineBackground(() => {
         await waitForContentReady(tabId);
 
         // Surface the floating menu on the run tab so progress + End run are
-        // reachable there (best-effort; the panel may be open instead).
-        void setFloatingVisible(tabId, true).catch(() => {});
+        // reachable there (best-effort).
+        void (async () => {
+          await setUiVisible(true);
+          await ensureMenuInTab(tabId);
+        })().catch(() => {});
 
         for (let i = 0; i < workflow.steps.length; i++) {
           if (cancelRequested) {
@@ -614,64 +612,53 @@ export default defineBackground(() => {
   // Wiring
   // ---------------------------------------------------------------------------
 
-  // Session pickup: whenever a page on the fe origin finishes loading
-  // (e.g. the post-OAuth redirect after the user signs in), re-read the
-  // session so the panel reflects it without any manual refresh.
-  browser.webNavigation.onCompleted.addListener(
-    (details) => {
-      if (details.frameId !== 0) return;
-      void refreshAccount().then(broadcast);
-    },
-    { url: [{ urlPrefix: FE_URL }] },
-  );
-
-  const openSidePanel = async (windowId?: number) => {
-    if (windowId == null) return;
-    await (browser as unknown as {
-      sidePanel?: { open: (o: { windowId: number }) => Promise<void> };
-    }).sidePanel?.open?.({ windowId });
+  // Session pickup: re-read the fe session on any top-frame navigation to the
+  // fe origin so the extension reflects sign-in/out without manual refresh.
+  // onCompleted covers full loads (the post-OAuth redirect); the History-API
+  // events cover fe's client-side navigations — notably the dashboard's
+  // sign-out, which clears the cookie then `router.push('/')` without a
+  // full reload, so onCompleted alone would miss it.
+  const onFeNavigation = (details: { frameId: number }) => {
+    if (details.frameId !== 0) return;
+    void refreshAccount().then(broadcast);
   };
+  const feFilter = { url: [{ urlPrefix: FE_URL }] };
+  browser.webNavigation.onCompleted.addListener(onFeNavigation, feFilter);
+  browser.webNavigation.onHistoryStateUpdated.addListener(onFeNavigation, feFilter);
 
-  const setFloatingVisible = async (tabId: number, visible: boolean) => {
-    await browser.storage.session.set({ [UI_OPEN_KEY]: visible });
-    await browser.tabs.sendMessage(tabId, { kind: 'ui.setVisible', visible });
-  };
+  // Visibility is a single global flag in storage.local. Every floating-menu
+  // content script watches it via storage.onChanged, so this one write shows
+  // or hides the menu on whatever tab the user is looking at — no per-tab
+  // messaging, no storage.session access-level, no mount-timing races.
+  const setUiVisible = (visible: boolean) =>
+    browser.storage.local.set({ [UI_OPEN_KEY]: visible });
 
-  // Pages where our content script can't run: the floating menu is
-  // impossible, so the toolbar opens the docked side panel instead.
-  const isRestricted = (url?: string) =>
-    !/^https?:\/\//.test(url ?? '') ||
-    /^https:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/.test(url ?? '');
-
-  // Toolbar icon: toggle the floating menu on the active tab. The
-  // restricted-page branch must open the side panel *synchronously* —
-  // sidePanel.open() only works within the click's user gesture, which the
-  // first `await` would consume.
-  browser.action.onClicked.addListener((tab) => {
-    if (tab.id == null) return;
-    if (isRestricted(tab.url)) {
-      void openSidePanel(tab.windowId ?? undefined);
-      return;
-    }
-    const tabId = tab.id;
-    void (async () => {
+  // Make sure the active tab actually has a menu to react to the flag: tabs
+  // opened before the extension loaded have no content script. A ping detects
+  // its absence; executeScript injects one (the script self-guards against a
+  // double mount).
+  const ensureMenuInTab = async (tabId: number) => {
+    try {
+      await browser.tabs.sendMessage(tabId, { kind: 'ui.ping' });
+    } catch {
       try {
-        const res = await browser.storage.session.get(UI_OPEN_KEY);
-        await setFloatingVisible(tabId, !res[UI_OPEN_KEY]);
+        await browser.scripting.executeScript({
+          target: { tabId },
+          files: ['/content-scripts/leo-ui.js'],
+        });
       } catch {
-        // An http(s) tab that predates the extension has no content script
-        // yet. The gesture is already gone, so inject the menu on demand
-        // rather than reaching for the side panel.
-        try {
-          await browser.scripting.executeScript({
-            target: { tabId },
-            files: ['/content-scripts/leo-ui.js'],
-          });
-          await setFloatingVisible(tabId, true);
-        } catch {
-          // Injection blocked (e.g. a CSP-locked page); nothing more to do.
-        }
+        // Restricted page (chrome://, web store, …) — nothing to inject into.
       }
+    }
+  };
+
+  // Toolbar icon: toggle the floating menu.
+  browser.action.onClicked.addListener((tab) => {
+    void (async () => {
+      const res = await browser.storage.local.get(UI_OPEN_KEY);
+      const next = !res[UI_OPEN_KEY];
+      await setUiVisible(next);
+      if (next && tab.id != null) await ensureMenuInTab(tab.id);
     })();
   });
 
@@ -772,25 +759,6 @@ export default defineBackground(() => {
               await signOutFe();
               await refreshAccount();
               broadcast();
-              return { ok: true };
-            }
-            case 'panel.openSidePanel': {
-              // Dock the floating menu into the side panel. Runs inside the
-              // click's gesture window (the message came from a UI click).
-              await openSidePanel(sender.tab?.windowId);
-              if (sender.tab?.id != null) await setFloatingVisible(sender.tab.id, false);
-              return { ok: true };
-            }
-            case 'panel.openFloating': {
-              // Switch back to the floating menu on the active tab.
-              const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-              if (tab?.id != null) {
-                try {
-                  await setFloatingVisible(tab.id, true);
-                } catch {
-                  // no content script on this tab
-                }
-              }
               return { ok: true };
             }
             case 'panel.getSettings':

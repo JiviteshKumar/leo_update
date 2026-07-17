@@ -20,11 +20,19 @@ export default defineContentScript({
     const startRecording = () => {
       if (detach) return;
       detach = attachRecorder((step: Step, replaceLastClicks?: number) => {
-        void browser.runtime
-          .sendMessage({ kind: 'rec.step', step, replaceLastClicks })
-          .catch(() => {
-            // background gone or recording stopped mid-flight
-          });
+        // After an extension reload this script is orphaned and sendMessage
+        // throws synchronously; guard so a stray user event can't surface an
+        // uncaught "Extension context invalidated".
+        try {
+          if (!browser.runtime?.id) return;
+          void browser.runtime
+            .sendMessage({ kind: 'rec.step', step, replaceLastClicks })
+            .catch(() => {
+              // background gone or recording stopped mid-flight
+            });
+        } catch {
+          // context invalidated
+        }
       });
     };
 
