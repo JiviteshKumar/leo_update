@@ -14,6 +14,8 @@ export const workflows = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
+    // One-line AI-derived summary of the workflow; may be absent on older rows.
+    objective: text('objective'),
     startUrl: text('start_url').notNull(),
     steps: jsonb('steps').$type<Step[]>().notNull(),
     healCount: integer('heal_count').notNull().default(0),

@@ -354,7 +354,9 @@ export const agentAct = async (action: AgentAction): Promise<ExecResult> => {
       (el as HTMLElement).focus?.();
       dispatchClick(el, x, y);
       cursorHide();
-      return { ok: true };
+      // Fresh selectors let the background repair the saved workflow when
+      // this action turns out to be the recovery of a recorded step.
+      return { ok: true, healedSelectors: generateSelectors(el) };
     }
 
     const el = lastCandidates[action.index];
@@ -374,7 +376,7 @@ export const agentAct = async (action: AgentAction): Promise<ExecResult> => {
       dispatchKey(el, action.key);
     }
     cursorHide();
-    return { ok: true };
+    return { ok: true, healedSelectors: generateSelectors(el) };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

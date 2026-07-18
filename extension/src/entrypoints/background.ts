@@ -1,4 +1,12 @@
-import { describeAiError, healStep, recoveryGoal, runAgentStep } from '@/utils/ai';
+import {
+  deriveObjective,
+  describeAiError,
+  healStep,
+  recoveryGoal,
+  runAgentStep,
+  selectorsFromRecovery,
+  type AgentRunResult,
+} from '@/utils/ai';
 import { ANTHROPIC_API_KEY } from '@/utils/env';
 import {
   FE_URL,
@@ -224,7 +232,30 @@ export default defineBackground(() => {
     await saveWorkflow(workflow);
     pushIfSignedIn(workflow);
     broadcast();
+    // Derive a name + objective from the steps in the background — cheap, and
+    // it grounds the healer/agent later. Non-blocking: the save above already
+    // succeeded, so we patch the workflow when (if) the summary returns.
+    void deriveObjectiveFor(workflow.id, rec.steps, Boolean(name.trim()));
     return { ok: true };
+  };
+
+  // Fire-and-forget objective derivation; patches the saved workflow in place.
+  const deriveObjectiveFor = async (
+    id: string,
+    steps: Step[],
+    userNamed: boolean,
+  ): Promise<void> => {
+    if (!ANTHROPIC_API_KEY) return;
+    const result = await deriveObjective(await getSettings(), steps);
+    if (!result) return;
+    const wf = await getWorkflow(id);
+    if (!wf) return; // deleted meanwhile
+    wf.objective = result.objective;
+    if (!userNamed && result.name) wf.name = result.name;
+    wf.updatedAt = Date.now();
+    await saveWorkflow(wf);
+    pushIfSignedIn(wf);
+    broadcast();
   };
 
   const discardRecording = async () => {
@@ -411,6 +442,7 @@ export default defineBackground(() => {
         { intent: step.target.intent, target: step.target },
         result.candidates,
         { title: result.pageTitle, url: result.pageUrl },
+        workflow.objective,
       );
     } catch (err) {
       throw new Error(`element not found and AI repair failed: ${describeAiError(err)}`);
@@ -418,8 +450,8 @@ export default defineBackground(() => {
     if (verdict.match == null) {
       // The cheap text healer is out of its depth (typical for visual widgets
       // like date pickers). Escalate to the vision agent, scoped to just this
-      // one action; the workflow itself is left unchanged.
-      await recoverStepWithAgent(step, tabId, verdict.reason, stepIndex);
+      // one action.
+      await recoverStepWithAgent(workflow, step, tabId, verdict.reason, stepIndex);
       return;
     }
 
@@ -434,20 +466,30 @@ export default defineBackground(() => {
     }
 
     if ('healedSelectors' in healed && healed.healedSelectors?.length) {
-      const target = (workflow.steps[stepIndex] as ElementStep).target;
-      target.selectors = [
-        ...healed.healedSelectors,
-        ...target.selectors.filter((s) => !healed.healedSelectors!.includes(s)),
-      ].slice(0, 8);
-      workflow.healCount += 1;
-      workflow.updatedAt = Date.now();
-      await saveWorkflow(workflow);
-      pushIfSignedIn(workflow);
+      await patchStepSelectors(workflow, stepIndex, healed.healedSelectors);
     }
     if (run) {
       run.healedSteps = [...run.healedSteps, stepIndex];
       broadcast();
     }
+  };
+
+  // Repair a saved workflow step with fresh selectors from a successful AI
+  // fix (text healer or vision agent), so the next run is deterministic.
+  const patchStepSelectors = async (
+    workflow: Workflow,
+    stepIndex: number,
+    fresh: string[],
+  ): Promise<void> => {
+    const target = (workflow.steps[stepIndex] as ElementStep).target;
+    target.selectors = [
+      ...fresh,
+      ...target.selectors.filter((s) => !fresh.includes(s)),
+    ].slice(0, 10);
+    workflow.healCount += 1;
+    workflow.updatedAt = Date.now();
+    await saveWorkflow(workflow);
+    pushIfSignedIn(workflow);
   };
 
   // Screenshot of the (active) run tab, downscaled so 1 image px == 1 CSS px
@@ -484,7 +526,11 @@ export default defineBackground(() => {
 
   // Run a dynamic `agent` step: hand the goal + live page (screenshot + DOM
   // snapshot) to Claude, which observes and acts until the goal is met.
-  const runAgentStepInTab = async (goal: string, tabId: number): Promise<void> => {
+  const runAgentStepInTab = async (
+    goal: string,
+    tabId: number,
+    objective?: string,
+  ): Promise<AgentRunResult> => {
     const settings = await getSettings();
     if (!ANTHROPIC_API_KEY) {
       throw new Error(
@@ -498,16 +544,27 @@ export default defineBackground(() => {
         kind: 'agent.act',
         action,
       })) as ExecResult;
-      return res.ok ? { ok: true } : { ok: false, error: 'error' in res ? res.error : 'failed' };
+      return res.ok
+        ? { ok: true, healedSelectors: 'healedSelectors' in res ? res.healedSelectors : undefined }
+        : { ok: false, error: 'error' in res ? res.error : 'failed' };
     };
     const capture = (dpr: number) => captureTab(tabId, dpr);
 
     let result;
     try {
-      result = await runAgentStep(settings, goal, new Date(), observe, act, capture, (note) => {
-        if (cancelRequested) return;
-        setRunStatus({ agentNote: note });
-      });
+      result = await runAgentStep(
+        settings,
+        goal,
+        new Date(),
+        observe,
+        act,
+        capture,
+        (note) => {
+          if (cancelRequested) return;
+          setRunStatus({ agentNote: note });
+        },
+        objective,
+      );
     } catch (err) {
       throw new Error(`AI step failed: ${describeAiError(err)}`);
     } finally {
@@ -516,24 +573,31 @@ export default defineBackground(() => {
     if (!result.success) {
       throw new Error(`AI step could not complete: ${result.note}`);
     }
+    return result;
   };
 
   // Vision-agent recovery for one failed recorded step. Runs only after the
-  // text healer gave up; completes the action without touching the workflow.
+  // text healer gave up. When the recovery was a single element action, the
+  // saved step is repaired with that element's fresh selectors so the next
+  // run replays deterministically instead of paying for the agent again.
   const recoverStepWithAgent = async (
+    workflow: Workflow,
     step: ElementStep,
     tabId: number,
     healReason: string,
     stepIndex: number,
   ): Promise<void> => {
+    let result: AgentRunResult;
     try {
-      await runAgentStepInTab(recoveryGoal(step), tabId);
+      result = await runAgentStepInTab(recoveryGoal(step), tabId, workflow.objective);
     } catch (err) {
       throw new Error(
         `element not found: ${step.target.intent}. Text repair failed (${healReason}) ` +
           `and the vision agent could not complete it either: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    const fresh = selectorsFromRecovery(result.performed);
+    if (fresh) await patchStepSelectors(workflow, stepIndex, fresh);
     if (run) {
       run.healedSteps = [...run.healedSteps, stepIndex];
       broadcast();
@@ -696,7 +760,7 @@ export default defineBackground(() => {
               break;
             }
             case 'agent': {
-              await runAgentStepInTab(step.goal, tabId);
+              await runAgentStepInTab(step.goal, tabId, workflow.objective);
               if (!fast) await sleep(400);
               break;
             }

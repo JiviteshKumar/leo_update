@@ -29,4 +29,5 @@ export interface Workflow {
   startUrl: string;
   steps: Step[];
   healCount: number;
+  objective?: string;
 }

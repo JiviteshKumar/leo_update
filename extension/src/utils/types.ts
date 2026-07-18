@@ -62,6 +62,10 @@ export interface Workflow {
   steps: Step[];
   // How many times the AI healer has repaired this workflow.
   healCount: number;
+  // One-line description of what the workflow accomplishes, derived by AI at
+  // record time. Fed to the healer/agent as global context so a broken or
+  // dynamic step is resolved with knowledge of the overall goal.
+  objective?: string;
 }
 
 // ---------------------------------------------------------------------------

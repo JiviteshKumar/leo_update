@@ -5,6 +5,7 @@ import type {
   AgentSnapshot,
   Candidate,
   Settings,
+  Step,
   TargetInfo,
 } from './types';
 
@@ -49,6 +50,7 @@ export const healStep = async (
   step: { intent: string; target: TargetInfo },
   candidates: Candidate[],
   page: { title: string; url: string },
+  objective?: string,
 ): Promise<HealVerdict> => {
   const client = new Anthropic({
     apiKey: ANTHROPIC_API_KEY,
@@ -65,6 +67,7 @@ export const healStep = async (
     .join('\n');
 
   const user = [
+    objective ? `Workflow goal: ${objective}` : '',
     `Page: ${page.title} (${page.url})`,
     '',
     'Original step:',
@@ -101,6 +104,78 @@ export const healStep = async (
     return { match: null, confidence: 'low', reason: 'model returned an invalid index' };
   }
   return verdict;
+};
+
+// ---------------------------------------------------------------------------
+// Objective derivation: one cheap call at record time that turns the step
+// list into a name + one-line goal, later fed to the healer/agent as context.
+// ---------------------------------------------------------------------------
+
+const OBJECTIVE_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    name: { type: 'string', description: 'A short imperative title, at most 6 words.' },
+    objective: {
+      type: 'string',
+      description: 'One sentence: what the whole workflow accomplishes for the user.',
+    },
+  },
+  required: ['name', 'objective'],
+  additionalProperties: false,
+};
+
+const describeStep = (step: Step): string => {
+  switch (step.type) {
+    case 'navigate':
+      return `Go to ${step.url}`;
+    case 'nav-wait':
+      return 'Wait for the page to load';
+    case 'click':
+      return step.target.intent;
+    case 'dblclick':
+      return `Double ${step.target.intent.toLowerCase()}`;
+    case 'type':
+      return step.secret
+        ? `Type a secret value into "${step.target.intent}"`
+        : `${step.target.intent}: "${step.text.slice(0, 40)}"`;
+    case 'select':
+      return `${step.target.intent}: ${step.label}`;
+    case 'key':
+      return `Press ${step.key}`;
+    case 'download':
+      return 'Wait for a file download';
+    case 'agent':
+      return `AI: ${step.goal}`;
+  }
+};
+
+export const deriveObjective = async (
+  settings: Settings,
+  steps: Step[],
+): Promise<{ name: string; objective: string } | null> => {
+  if (!ANTHROPIC_API_KEY) return null;
+  const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY, dangerouslyAllowBrowser: true });
+  const lines = steps.map((s, i) => `${i + 1}. ${describeStep(s)}`).join('\n');
+  try {
+    const response = await client.messages.create({
+      model: settings.model,
+      max_tokens: 300,
+      system:
+        'You summarize a recorded browser automation. Given its ordered steps, ' +
+        'return a short imperative name and a one-sentence objective describing ' +
+        'what the whole workflow accomplishes for the user. Be concrete; name the ' +
+        'site or task when it is clear from the steps.',
+      output_config: { format: { type: 'json_schema', schema: OBJECTIVE_SCHEMA } },
+      messages: [{ role: 'user', content: `Steps:\n${lines}` }],
+    });
+    if (response.stop_reason === 'refusal') return null;
+    const text = response.content.find((b) => b.type === 'text')?.text ?? '';
+    const parsed = JSON.parse(text) as { name?: string; objective?: string };
+    if (!parsed.objective) return null;
+    return { name: (parsed.name ?? '').trim(), objective: parsed.objective.trim() };
+  } catch {
+    return null;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -265,19 +340,56 @@ const observationContent = (
   return blocks;
 };
 
+// Prompt caching: the whole conversation (system + tools + every prior turn's
+// screenshots and snapshots) is re-sent each turn. A single ephemeral cache
+// breakpoint on the last block of the last message lets the API serve that
+// growing prefix from cache (~0.1x input price) instead of full price — which
+// is the dominant cost of the agent loop. Moving the marker doesn't change the
+// cached content, so it never invalidates. Called before every request.
+const CACHE_CONTROL = { type: 'ephemeral' as const };
+const moveCacheBreakpoint = (messages: Anthropic.MessageParam[]): void => {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b && typeof b === 'object') delete (b as { cache_control?: unknown }).cache_control;
+    }
+  }
+  const last = messages[messages.length - 1];
+  if (last && Array.isArray(last.content) && last.content.length > 0) {
+    const block = last.content[last.content.length - 1] as { cache_control?: unknown };
+    if (block && typeof block === 'object') block.cache_control = CACHE_CONTROL;
+  }
+};
+
+// A successfully executed agent action, with fresh selectors for the element
+// it touched (when it touched one) so recovered workflow steps can be
+// repaired in storage.
+export interface PerformedAction {
+  action: AgentAction;
+  healedSelectors?: string[];
+}
+
+export interface AgentRunResult {
+  success: boolean;
+  note: string;
+  performed: PerformedAction[];
+}
+
 export const runAgentStep = async (
   settings: Settings,
   goal: string,
   now: Date,
   observe: () => Promise<AgentSnapshot>,
-  act: (action: AgentAction) => Promise<{ ok: boolean; error?: string }>,
+  act: (action: AgentAction) => Promise<{ ok: boolean; error?: string; healedSelectors?: string[] }>,
   // Returns a base64 JPEG of the tab, downscaled so 1 image px == 1 CSS px
   // (candidate rects and click_at coordinates line up with the image), or
   // null when capture fails — the loop then runs text-only for that turn.
   capture: (dpr: number) => Promise<string | null>,
   onProgress?: (note: string) => void,
-): Promise<{ success: boolean; note: string }> => {
+  objective?: string,
+): Promise<AgentRunResult> => {
   const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY, dangerouslyAllowBrowser: true });
+  const performed: PerformedAction[] = [];
 
   const first = await observe();
   const firstShot = await capture(first.viewport.dpr);
@@ -288,7 +400,8 @@ export const runAgentStep = async (
         {
           type: 'text',
           text:
-            `Goal: ${goal}\n` +
+            (objective ? `Workflow goal: ${objective}\n` : '') +
+            `This step: ${goal}\n` +
             `Current date: ${now.toDateString()} (ISO ${now.toISOString().slice(0, 10)}).`,
         },
         ...observationContent(first, firstShot),
@@ -297,6 +410,7 @@ export const runAgentStep = async (
   ];
 
   for (let i = 0; i < AGENT_MAX_STEPS; i++) {
+    moveCacheBreakpoint(messages);
     const resp = await client.messages.create({
       model: settings.model,
       max_tokens: 1024,
@@ -305,7 +419,7 @@ export const runAgentStep = async (
       messages,
     });
     if (resp.stop_reason === 'refusal') {
-      return { success: false, note: 'the model declined the request' };
+      return { success: false, note: 'the model declined the request', performed };
     }
     messages.push({ role: 'assistant', content: resp.content });
 
@@ -313,7 +427,7 @@ export const runAgentStep = async (
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
     );
     if (toolUses.length === 0) {
-      return { success: false, note: 'the agent stopped without finishing' };
+      return { success: false, note: 'the agent stopped without finishing', performed };
     }
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
@@ -321,7 +435,7 @@ export const runAgentStep = async (
       if (tu.name === 'finish') {
         const input = tu.input as { success?: boolean; note?: string };
         onProgress?.(input.note ?? '');
-        return { success: Boolean(input.success), note: input.note ?? '' };
+        return { success: Boolean(input.success), note: input.note ?? '', performed };
       }
       const action = toAction(tu.name, (tu.input ?? {}) as Record<string, unknown>);
       let note: string;
@@ -331,6 +445,7 @@ export const runAgentStep = async (
         onProgress?.(actionLabel(action));
         const r = await act(action);
         note = r.ok ? 'done' : `failed: ${r.error ?? 'error'}`;
+        if (r.ok) performed.push({ action, healedSelectors: r.healedSelectors });
       }
       const snap = await observe();
       const shot = await capture(snap.viewport.dpr);
@@ -342,7 +457,7 @@ export const runAgentStep = async (
     }
     messages.push({ role: 'user', content: toolResults });
   }
-  return { success: false, note: `did not finish within ${AGENT_MAX_STEPS} steps` };
+  return { success: false, note: `did not finish within ${AGENT_MAX_STEPS} steps`, performed };
 };
 
 // Goal text for vision-agent recovery of one failed recorded step. Kept pure
@@ -360,6 +475,20 @@ export const recoveryGoal = (step: {
     ? ` Text near it when recorded: "${step.target.context.slice(0, 150)}".`
     : '') +
   (step.type === 'type' && !step.secret && step.text ? ` Text to type: "${step.text}".` : '');
+
+// Selectors to repair a recovered step with, or null when repair would be
+// unsafe. Only a recovery that took exactly ONE element action is
+// unambiguous: that element must be the control the step pointed at. A
+// multi-action recovery (open dropdown → click option) can't be captured in
+// one step's selectors — patching the last element would make the next run
+// skip the earlier actions and break again. Scrolls don't touch elements and
+// are ignored.
+export const selectorsFromRecovery = (performed: PerformedAction[]): string[] | null => {
+  const elementActions = performed.filter((p) => p.action.kind !== 'scroll');
+  if (elementActions.length !== 1) return null;
+  const sels = elementActions[0].healedSelectors;
+  return sels && sels.length ? sels : null;
+};
 
 export const describeAiError = (err: unknown): string => {
   if (err instanceof Anthropic.AuthenticationError) {

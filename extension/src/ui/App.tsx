@@ -505,6 +505,7 @@ export function App() {
               ) : (
                 <div className="wf-main">
                   <div className="wf-name">{wf.name}</div>
+                  {wf.objective && <div className="wf-objective">{wf.objective}</div>}
                   <div className="wf-meta">
                     {wf.steps.length} steps
                     {wf.healCount > 0 && ` · repaired ${wf.healCount}x by AI`}

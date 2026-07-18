@@ -343,6 +343,12 @@ h2 .dismiss:hover {
   font-weight: 600;
 }
 
+.wf-objective {
+  color: var(--text);
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 .wf-meta {
   color: var(--muted);
   font-size: 11px;

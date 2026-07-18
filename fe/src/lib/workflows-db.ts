@@ -20,6 +20,7 @@ export const upsertUserWorkflow = async (userId: string, wf: Workflow) => {
       id: wf.id,
       userId,
       name: wf.name,
+      objective: wf.objective ?? null,
       startUrl: wf.startUrl,
       steps: wf.steps,
       healCount: wf.healCount,
@@ -30,6 +31,7 @@ export const upsertUserWorkflow = async (userId: string, wf: Workflow) => {
       target: workflows.id,
       set: {
         name: wf.name,
+        objective: wf.objective ?? null,
         startUrl: wf.startUrl,
         steps: wf.steps,
         healCount: wf.healCount,
@@ -52,6 +54,7 @@ export const toWireWorkflow = (
 ): Workflow => ({
   id: row.id,
   name: row.name,
+  objective: row.objective ?? undefined,
   startUrl: row.startUrl,
   steps: row.steps,
   healCount: row.healCount,
