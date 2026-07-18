@@ -7,7 +7,7 @@ import type {
   Step,
   Workflow,
 } from '@/utils/types';
-import { DEFAULT_CURSOR_COLOR, DEFAULT_MODEL, DEFAULT_SPEED, STATE_UPDATE } from '@/utils/types';
+import { DEFAULT_CURSOR_COLOR, DEFAULT_SPEED, STATE_UPDATE } from '@/utils/types';
 
 const CURSOR_PRESETS = ['#4c8bf5', '#f5b301', '#e5484d', '#46a758', '#a855f7'];
 
@@ -73,7 +73,6 @@ export function App() {
   // undefined = not checked yet, null = checked and signed out.
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   const [settings, setSettingsState] = useState<Settings>({
-    model: DEFAULT_MODEL,
     cursorColor: DEFAULT_CURSOR_COLOR,
     speed: DEFAULT_SPEED,
   });
@@ -193,21 +192,6 @@ export function App() {
           </div>
         </section>
         <section className="card">
-          <label className="field">
-            <span>Repair model</span>
-            <select
-              value={settings.model}
-              onChange={(e) => setSettingsState({ ...settings, model: e.target.value })}
-            >
-              <option value="claude-opus-4-8">Claude Opus 4.8 (recommended)</option>
-              <option value="claude-sonnet-5">Claude Sonnet 5</option>
-              <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
-            </select>
-          </label>
-          <p className="hint">
-            When a website changes and a recorded step breaks, Leo asks Claude to find
-            the same control on the new page and repairs the workflow.
-          </p>
           <div className="field">
             <span>Replay speed</span>
             <label className="radio">

@@ -246,7 +246,7 @@ export default defineBackground(() => {
     userNamed: boolean,
   ): Promise<void> => {
     if (!ANTHROPIC_API_KEY) return;
-    const result = await deriveObjective(await getSettings(), steps);
+    const result = await deriveObjective(steps);
     if (!result) return;
     const wf = await getWorkflow(id);
     if (!wf) return; // deleted meanwhile
@@ -428,7 +428,6 @@ export default defineBackground(() => {
       throw new Error('element not found');
     }
 
-    const settings = await getSettings();
     if (!ANTHROPIC_API_KEY) {
       throw new Error(
         `element not found: ${step.target.intent}. This build has no Anthropic API key, so AI repair is unavailable (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
@@ -438,7 +437,6 @@ export default defineBackground(() => {
     let verdict;
     try {
       verdict = await healStep(
-        settings,
         { intent: step.target.intent, target: step.target },
         result.candidates,
         { title: result.pageTitle, url: result.pageUrl },
@@ -531,7 +529,6 @@ export default defineBackground(() => {
     tabId: number,
     objective?: string,
   ): Promise<AgentRunResult> => {
-    const settings = await getSettings();
     if (!ANTHROPIC_API_KEY) {
       throw new Error(
         `This AI step ("${goal}") needs an Anthropic API key, but this build has none (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
@@ -553,7 +550,6 @@ export default defineBackground(() => {
     let result;
     try {
       result = await runAgentStep(
-        settings,
         goal,
         new Date(),
         observe,

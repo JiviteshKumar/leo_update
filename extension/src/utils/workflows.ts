@@ -1,5 +1,5 @@
 import type { Settings, Workflow } from './types';
-import { DEFAULT_CURSOR_COLOR, DEFAULT_MODEL, DEFAULT_SPEED } from './types';
+import { DEFAULT_CURSOR_COLOR, DEFAULT_SPEED } from './types';
 
 const WORKFLOWS_KEY = 'leo:workflows';
 const SETTINGS_KEY = 'leo:settings';
@@ -35,7 +35,6 @@ export const getSettings = async (): Promise<Settings> => {
   const res = await browser.storage.local.get(SETTINGS_KEY);
   const s = (res[SETTINGS_KEY] as Partial<Settings> | undefined) ?? {};
   return {
-    model: s.model ?? DEFAULT_MODEL,
     cursorColor: s.cursorColor ?? DEFAULT_CURSOR_COLOR,
     speed: s.speed ?? DEFAULT_SPEED,
   };

@@ -111,7 +111,6 @@ export type RunSpeed = 'verbose' | 'agent';
 // The Anthropic API key is not a setting: it's baked in at build time from
 // extension/.env (see src/utils/env.ts).
 export interface Settings {
-  model: string;
   cursorColor: string;
   speed: RunSpeed;
 }
@@ -123,7 +122,9 @@ export interface Account {
   image?: string | null;
 }
 
-export const DEFAULT_MODEL = 'claude-opus-4-8';
+// The single model Leo uses for every AI call (selector healer, vision agent,
+// objective derivation). Set here in code — not user-configurable.
+export const DEFAULT_MODEL = 'claude-sonnet-5';
 export const DEFAULT_CURSOR_COLOR = '#4c8bf5';
 export const DEFAULT_SPEED: RunSpeed = 'verbose';
 

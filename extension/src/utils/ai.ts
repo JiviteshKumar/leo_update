@@ -4,10 +4,10 @@ import type {
   AgentAction,
   AgentSnapshot,
   Candidate,
-  Settings,
   Step,
   TargetInfo,
 } from './types';
+import { DEFAULT_MODEL } from './types';
 
 // AI self-healing: when every recorded selector fails, ask Claude to match
 // the step's intent against the live page's interactive elements. Structured
@@ -46,7 +46,6 @@ const SYSTEM_PROMPT =
   'purpose, return null rather than guessing.';
 
 export const healStep = async (
-  settings: Settings,
   step: { intent: string; target: TargetInfo },
   candidates: Candidate[],
   page: { title: string; url: string },
@@ -83,7 +82,7 @@ export const healStep = async (
     .join('\n');
 
   const response = await client.messages.create({
-    model: settings.model,
+    model: DEFAULT_MODEL,
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
     output_config: {
@@ -150,7 +149,6 @@ const describeStep = (step: Step): string => {
 };
 
 export const deriveObjective = async (
-  settings: Settings,
   steps: Step[],
 ): Promise<{ name: string; objective: string } | null> => {
   if (!ANTHROPIC_API_KEY) return null;
@@ -158,7 +156,7 @@ export const deriveObjective = async (
   const lines = steps.map((s, i) => `${i + 1}. ${describeStep(s)}`).join('\n');
   try {
     const response = await client.messages.create({
-      model: settings.model,
+      model: DEFAULT_MODEL,
       max_tokens: 300,
       system:
         'You summarize a recorded browser automation. Given its ordered steps, ' +
@@ -376,7 +374,6 @@ export interface AgentRunResult {
 }
 
 export const runAgentStep = async (
-  settings: Settings,
   goal: string,
   now: Date,
   observe: () => Promise<AgentSnapshot>,
@@ -412,7 +409,7 @@ export const runAgentStep = async (
   for (let i = 0; i < AGENT_MAX_STEPS; i++) {
     moveCacheBreakpoint(messages);
     const resp = await client.messages.create({
-      model: settings.model,
+      model: DEFAULT_MODEL,
       max_tokens: 1024,
       system: AGENT_SYSTEM,
       tools: AGENT_TOOLS,
