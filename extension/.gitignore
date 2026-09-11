@@ -9,6 +9,8 @@ node_modules/
 # Environment / secrets
 .env
 .env.*
+# the template, with placeholders only, is committed
+!.env.example
 
 # Logs
 *.log
