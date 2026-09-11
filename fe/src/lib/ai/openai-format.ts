@@ -36,10 +36,32 @@ export const textOf = (content: unknown): string => {
     .join('\n');
 };
 
-export const toOpenAiMessages = (system: string, messages: Anthropic.MessageParam[]): OaiMessage[] => {
+// An older page observation, cut down to what still matters later in the
+// conversation: what the action did and where it landed.
+const summarizeObservation = (text: string): string => {
+  const kept = text
+    .split('\n')
+    .filter((l) => l.startsWith('Last action:') || l.startsWith('Page:'))
+    .join('\n');
+  return kept || '(earlier page state omitted)';
+};
+
+// `compact`: keep full page observations only in the newest user turn. Text
+// models can't use stale element lists (indexes change after every action),
+// and dropping them keeps each request small for token-per-minute limits.
+export const toOpenAiMessages = (
+  system: string,
+  messages: Anthropic.MessageParam[],
+  opts: { compact?: boolean } = {},
+): OaiMessage[] => {
   const out: OaiMessage[] = [{ role: 'system', content: system }];
-  for (const m of messages) {
+  let lastUser = -1;
+  messages.forEach((m, i) => {
+    if (m.role === 'user') lastUser = i;
+  });
+  for (const [idx, m] of messages.entries()) {
     const blocks = blocksOf(m.content);
+    const stale = Boolean(opts.compact) && idx !== lastUser;
     if (m.role === 'assistant') {
       const text = blocks
         .filter((b) => b.type === 'text')
@@ -59,15 +81,21 @@ export const toOpenAiMessages = (system: string, messages: Anthropic.MessagePara
     // follow the assistant message that called them); anything else is
     // plain user text.
     const text: string[] = [];
+    let textBlocks = 0;
     for (const b of blocks) {
       if (b.type === 'tool_result') {
-        const result = textOf(b.content);
+        const full = textOf(b.content);
+        const result = stale ? summarizeObservation(full) : full;
         out.push({
           role: 'tool',
           tool_call_id: String(b.tool_use_id),
           content: (b.is_error ? 'ERROR: ' : '') + (result || '(no output)'),
         });
       } else if (b.type === 'text') {
+        // The opening turn is the goal followed by the first observation;
+        // once stale, only the goal is kept.
+        if (stale && textBlocks > 0) continue;
+        textBlocks++;
         text.push(String(b.text ?? ''));
       }
     }

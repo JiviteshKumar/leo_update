@@ -65,6 +65,40 @@ describe('toOpenAiMessages', () => {
   });
 });
 
+describe('toOpenAiMessages compact', () => {
+  const twoTurns = [
+    ...conversation,
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'call_2', name: 'click', input: { index: 3 } }] },
+    {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'call_2', content: 'Last action: done\nPage: Plans (x)\n[5] <button> Done' }],
+    },
+  ] as unknown as Anthropic.MessageParam[];
+  const out = toOpenAiMessages('S', twoTurns, { compact: true });
+
+  test('keeps the goal but drops the first observation once stale', () => {
+    expect(out[1]).toEqual({ role: 'user', content: 'This step: pick Team' });
+  });
+
+  test('older tool results shrink to their summary lines', () => {
+    expect(out[3]).toEqual({ role: 'tool', tool_call_id: 'call_1', content: 'Last action: done' });
+  });
+
+  test('the newest observation is kept in full', () => {
+    expect(out[5]).toEqual({
+      role: 'tool',
+      tool_call_id: 'call_2',
+      content: 'Last action: done\nPage: Plans (x)\n[5] <button> Done',
+    });
+  });
+
+  test('a single-turn conversation is unchanged', () => {
+    expect(toOpenAiMessages('S', conversation.slice(0, 1), { compact: true })).toEqual(
+      toOpenAiMessages('S', conversation.slice(0, 1)),
+    );
+  });
+});
+
 describe('fromOpenAiMessage', () => {
   test('tool calls become tool_use blocks with parsed input', () => {
     const r = fromOpenAiMessage({

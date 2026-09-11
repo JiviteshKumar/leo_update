@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { FE_URL } from './env';
+import { pageChanges } from '@leo/shared';
 import type {
   AgentAction,
   AgentSnapshot,
@@ -99,7 +100,12 @@ interface AgentTurnResponse {
   stop_reason: Anthropic.StopReason | null;
 }
 
-const renderSnapshot = (s: AgentSnapshot, resultNote?: string): string => {
+const renderSnapshot = (
+  s: AgentSnapshot,
+  resultNote?: string,
+  history: string[] = [],
+  goal?: string,
+): string => {
   const lines = s.candidates.map((c) => {
     const attrs = Object.entries(c.attrs)
       .map(([k, v]) => `${k}="${v}"`)
@@ -108,7 +114,13 @@ const renderSnapshot = (s: AgentSnapshot, resultNote?: string): string => {
     return `[${c.index}] <${c.tag}${attrs ? ' ' + attrs : ''}> ${c.text || '(no text)'}${box}`;
   });
   return [
+    // Restated every turn: weaker models lose the goal as the conversation
+    // grows, and re-derive it wrongly from the current page.
+    goal ? `Goal (unchanged since the start): ${goal}` : '',
     resultNote ? `Last action: ${resultNote}` : '',
+    // The full action log keeps the goal's progress visible even to models
+    // that only see the newest observation in full.
+    history.length ? `Actions so far:\n${history.map((h, i) => `${i + 1}. ${h}`).join('\n')}` : '',
     `Page: ${s.title} (${s.url})`,
     `Viewport: ${s.viewport.w}x${s.viewport.h}`,
     'Interactive elements:',
@@ -162,13 +174,39 @@ const observationContent = (
   snap: AgentSnapshot,
   image: string | null,
   resultNote?: string,
+  history: string[] = [],
+  goal?: string,
 ): (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] => {
   const blocks: (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] = [];
   if (image) {
     blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image } });
   }
-  blocks.push({ type: 'text', text: renderSnapshot(snap, resultNote) });
+  blocks.push({ type: 'text', text: renderSnapshot(snap, resultNote, history, goal) });
   return blocks;
+};
+
+// An agent repeating one action this many times in a row is stuck; the step
+// fails instead of spending the rest of its turns.
+const MAX_SAME_ACTION_IN_A_ROW = 6;
+
+// "click [5] <li> "Team"" — the action with the element it targeted, named
+// from the observation the model acted on (indexes change afterwards).
+const describeAction = (a: AgentAction, snap: AgentSnapshot): string => {
+  const c = 'index' in a ? snap.candidates[a.index] : undefined;
+  const name = c ? (c.text || c.attrs['aria-label'] || c.attrs.title || '').slice(0, 40) : '';
+  const what = 'index' in a ? `[${a.index}]${c ? ` <${c.tag}>${name ? ` "${name}"` : ''}` : ''}` : '';
+  switch (a.kind) {
+    case 'click':
+      return `click ${what}`;
+    case 'type':
+      return `type "${a.text.slice(0, 30)}" into ${what}`;
+    case 'key':
+      return `press ${a.key} on ${what}`;
+    case 'clickAt':
+      return `click at (${a.x}, ${a.y})`;
+    case 'scroll':
+      return `scroll ${a.dy > 0 ? 'down' : 'up'} ${Math.abs(a.dy)}px`;
+  }
 };
 
 export interface AgentRunResult {
@@ -196,12 +234,19 @@ export const runAgentStep = async (
   objective?: string,
 ): Promise<AgentRunResult> => {
   const performed: PerformedAction[] = [];
+  // What the agent has done, one line per action with its outcome, and how
+  // often each exact action succeeded (to catch loops).
+  const history: string[] = [];
+  const repeats = new Map<string, number>();
+  let lastDesc = '';
+  let sameInARow = 0;
   const checkCancelled = () => {
     if (io.signal?.aborted) throw new AiError('Cancelled.', 'cancelled');
   };
 
   const first = await io.observe();
   const firstShot = await io.capture(first.viewport.dpr);
+  let lastSnap = first;
   const messages: Anthropic.MessageParam[] = [
     {
       role: 'user',
@@ -245,21 +290,45 @@ export const runAgentStep = async (
       checkCancelled();
       const action = toAction(tu.name, (tu.input ?? {}) as Record<string, unknown>);
       let note: string;
+      let failed = false;
       if (!action) {
         note = `unknown or malformed tool call: ${tu.name}`;
+        failed = true;
       } else {
         io.onProgress?.(actionLabel(action));
+        const desc = describeAction(action, lastSnap);
+        sameInARow = desc === lastDesc ? sameInARow + 1 : 1;
+        lastDesc = desc;
+        if (sameInARow > MAX_SAME_ACTION_IN_A_ROW) {
+          return {
+            success: false,
+            note: `the agent got stuck repeating "${desc}"`,
+            performed,
+          };
+        }
         const r = await io.act(action);
-        note = r.ok ? 'done' : `failed: ${r.error ?? 'error'}`;
-        if (r.ok) performed.push({ action, healedSelectors: r.healedSelectors });
+        if (r.ok) {
+          performed.push({ action, healedSelectors: r.healedSelectors });
+          const n = (repeats.get(desc) ?? 0) + 1;
+          repeats.set(desc, n);
+          note = `${desc} → done`;
+          if (sameInARow >= 2) note += ` (repeated ${sameInARow}× in a row)`;
+          else if (n >= 2) note += ` (done ${n}× in this step)`;
+        } else {
+          note = `${desc} → failed: ${r.error ?? 'error'}`;
+          failed = true;
+        }
       }
       const snap = await io.observe();
+      if (action) note += ` [page: ${pageChanges(lastSnap.pageText, snap.pageText)}]`;
+      history.push(note);
+      lastSnap = snap;
       const shot = await io.capture(snap.viewport.dpr);
       toolResults.push({
         type: 'tool_result',
         tool_use_id: tu.id,
-        content: observationContent(snap, shot, note),
-        ...(action && note !== 'done' ? { is_error: true } : {}),
+        content: observationContent(snap, shot, note, history, goal),
+        ...(failed ? { is_error: true } : {}),
       });
     }
     messages.push({ role: 'user', content: toolResults });

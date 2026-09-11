@@ -134,9 +134,12 @@ const AGENT_SYSTEM =
   'is off-screen. After every action you get a fresh screenshot and list — ' +
   're-read them, since indexes change. Orient yourself from what is visible ' +
   '(e.g. the month shown in a date picker) and compute relative goals from ' +
-  'the given current date. Take the smallest number of steps. Call ' +
-  'finish(success=true) the moment the goal is met, or finish(success=false, ' +
-  'note) if it is impossible.';
+  'the given current date. Take the smallest number of steps. Every turn, ' +
+  'first check whether the goal is already achieved on the current page — ' +
+  'for example a dropdown now shows the chosen value, or the right date is ' +
+  'selected — and if so call finish(success=true) instead of acting. Never ' +
+  'repeat an action that already succeeded. Call finish(success=false, ' +
+  'note) if the goal is impossible.';
 
 const TEXT_ONLY_NOTE =
   '\n\nIn this session screenshots are NOT available: work only from the ' +
@@ -202,7 +205,8 @@ export const agentTurn = async (body: unknown, ai: AiProvider): Promise<AgentTur
   const messages = parseAgentMessages(body);
   return ai.agentTurn({
     system: ai.vision ? AGENT_SYSTEM : AGENT_SYSTEM + TEXT_ONLY_NOTE,
-    tools: AGENT_TOOLS,
+    // click_at aims at a point in the screenshot; without one it's a guess.
+    tools: ai.vision ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => t.name !== 'click_at'),
     messages,
   });
 };

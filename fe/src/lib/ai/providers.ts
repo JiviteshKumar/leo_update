@@ -96,18 +96,50 @@ interface ChatResponse {
   choices?: { message?: { content?: string | null; tool_calls?: OaiToolCall[] | null }; finish_reason?: string }[];
 }
 
+const MAX_RETRIES = 3;
+// Waits longer than this are reported instead of slept through.
+const MAX_RETRY_WAIT_MS = 30_000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// How long a 429 asks us to wait: the Retry-After header, or Groq's "Please
+// try again in 14.15s" message.
+export const retryDelayMs = (headers: Headers, detail: string): number => {
+  const header = Number(headers.get('retry-after'));
+  if (Number.isFinite(header) && header > 0) return Math.ceil(header * 1000) + 250;
+  const m = /try again in (?:(\d+)m)?([\d.]+)s/i.exec(detail);
+  if (m) return Math.ceil((Number(m[1] ?? 0) * 60 + Number(m[2])) * 1000) + 250;
+  return 5_000;
+};
+
 const groqProvider = (model: string, apiKey: string): AiProvider => {
+  // Retries what is worth retrying: token-per-minute limits (after the wait
+  // Groq asks for), transient server errors, and malformed generations —
+  // GPT-OSS occasionally emits an unparseable tool call
+  // ("output_parse_failed") or calls a tool that doesn't exist
+  // ("tool_use_failed"); a fresh sample usually fixes both.
   const chat = async (body: Record<string, unknown>): Promise<ChatResponse> => {
-    const res = await fetch(GROQ_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, ...body }),
-    });
-    if (!res.ok) {
-      const detail = (await res.text().catch(() => '')).slice(0, 400);
-      throw new ProviderError(`Groq returned HTTP ${res.status}: ${detail}`, res.status);
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(GROQ_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, ...body }),
+      });
+      if (res.ok) return (await res.json()) as ChatResponse;
+      const detail = (await res.text().catch(() => '')).slice(0, 600);
+      const parseFailed =
+        res.status === 400 && (detail.includes('output_parse_failed') || detail.includes('tool_use_failed'));
+      const retryable = res.status === 429 || res.status >= 500 || parseFailed;
+      if (retryable && attempt < MAX_RETRIES) {
+        const wait = res.status === 429 ? retryDelayMs(res.headers, detail) : 750 * (attempt + 1);
+        if (wait <= MAX_RETRY_WAIT_MS) {
+          console.warn(`[ai:groq] HTTP ${res.status}${parseFailed ? ' (malformed tool call)' : ''}; retrying in ${wait}ms`);
+          await sleep(wait);
+          continue;
+        }
+      }
+      throw new ProviderError(`Groq returned HTTP ${res.status}: ${detail.slice(0, 400)}`, res.status);
     }
-    return (await res.json()) as ChatResponse;
   };
 
   return {
@@ -145,9 +177,12 @@ const groqProvider = (model: string, apiKey: string): AiProvider => {
     },
     async agentTurn({ system, tools, messages }) {
       const response = await chat({
-        messages: toOpenAiMessages(system, messages),
+        messages: toOpenAiMessages(system, messages, { compact: true }),
         tools: toOpenAiTools(tools),
-        tool_choice: 'auto',
+        // Every agent turn is an action or finish(), so a tool call is
+        // always the right answer; requiring one stops GPT-OSS from
+        // answering in prose.
+        tool_choice: 'required',
         // One action per turn: element indexes change after every action.
         parallel_tool_calls: false,
         max_completion_tokens: 8_192,

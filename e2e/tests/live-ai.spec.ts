@@ -73,7 +73,7 @@ test.describe('live AI', () => {
     await expect(run.locator('#result')).toContainText('"plan":"team"');
   });
 
-  test('the vision agent navigates a custom date picker', async ({ leo }) => {
+  test('the agent navigates a custom date picker', async ({ leo }) => {
     const url = `${SITE}/dates.html`;
     const wf = workflow(url, [
       { type: 'navigate', url },

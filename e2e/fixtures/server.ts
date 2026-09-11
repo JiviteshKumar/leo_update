@@ -11,6 +11,8 @@
 // resolves it against the candidates in the request, so tests don't depend on
 // the page's element order.
 
+import { appendFileSync, mkdirSync } from 'node:fs';
+
 const PAGES = new URL('./pages/', import.meta.url);
 
 type Json = Record<string, unknown>;
@@ -112,6 +114,40 @@ const answerAi = (kind: keyof MockState, body: Json): Response => {
   return json(next);
 };
 
+// Live mode: one line per agent turn — what the model saw last (the newest
+// observation) and what it answered — so agent behaviour can be read after
+// a run. Written to e2e/test-results (gitignored).
+const AGENT_LOG = new URL('../test-results/live-agent-turns.log', import.meta.url);
+let agentTurn = 0;
+const logAgentTurn = (body: Json, answer: unknown) => {
+  const messages = (body.messages as { role: string; content: unknown }[]) ?? [];
+  const last = messages[messages.length - 1];
+  const texts: string[] = [];
+  const walk = (v: unknown) => {
+    if (typeof v === 'string') texts.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') {
+      const o = v as Json;
+      if (o.type === 'text' && typeof o.text === 'string') texts.push(o.text);
+      if (o.content) walk(o.content);
+    }
+  };
+  walk(last?.content);
+  const calls = ((answer as { content?: Json[] }).content ?? [])
+    .map((b) => (b.type === 'tool_use' ? `${b.name}(${JSON.stringify(b.input)})` : b.type === 'text' ? `text: ${String(b.text).slice(0, 200)}` : String(b.type)))
+    .join(' | ');
+  const entry =
+    `\n=== turn ${++agentTurn} (${messages.length} messages) ===\n` +
+    `SAW:\n${texts.join('\n').slice(0, 2500)}\n` +
+    `DID: ${calls}\n`;
+  try {
+    mkdirSync(new URL('../test-results/', import.meta.url), { recursive: true });
+    appendFileSync(AGENT_LOG, entry);
+  } catch {
+    // diagnostics only
+  }
+};
+
 const handler = async (req: Request): Promise<Response> => {
   const url = new URL(req.url);
   const path = url.pathname;
@@ -141,7 +177,9 @@ const handler = async (req: Request): Promise<Response> => {
     if (!(kind in mock)) return json({ error: 'unknown', code: 'bad_request' }, 404);
     if (live) {
       try {
-        return json(await live[kind](body));
+        const answer = await live[kind](body);
+        if (kind === 'agent') logAgentTurn(body, answer);
+        return json(answer);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error('[live ai]', message);

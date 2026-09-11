@@ -556,9 +556,19 @@ const describe = (els: Element[], withRects = false): Candidate[] => {
   });
 };
 
+// True for anything inside Leo's floating menu. Its controls live in the
+// <leo-ui> host's shadow root, which closest() can't see across.
+const inLeoUi = (el: Element): boolean => {
+  for (let node: Element | null = el; node; ) {
+    if (node.tagName.toLowerCase() === LEO_UI_HOST) return true;
+    node = node.parentElement ?? ((node.getRootNode() as ShadowRoot).host ?? null);
+  }
+  return false;
+};
+
 // Interactive elements on the page, including inside open shadow roots.
 // Leo's own menu is excluded.
-const onPage = (el: Element) => isVisible(el) && !el.closest(LEO_UI_HOST);
+const onPage = (el: Element) => isVisible(el) && !inLeoUi(el);
 
 export const collectCandidates = (): Candidate[] =>
   describe(deepQueryAll(INTERACTIVE_SELECTOR).filter(onPage).slice(0, 150));
@@ -585,10 +595,39 @@ const hasClickAffordance = (el: Element): boolean => {
   return false;
 };
 
+// Framework-handled clickables often carry no tag, role or attribute that
+// says "clickable" — only a pointer cursor (date-picker days, custom menu
+// items built from <span>/<div>). Count the outermost such element; its
+// children inherit the cursor and would only duplicate it.
+const isPointerTarget = (el: Element): boolean => {
+  try {
+    if (getComputedStyle(el).cursor !== 'pointer') return false;
+    const parent = el.parentElement;
+    return !parent || getComputedStyle(parent).cursor !== 'pointer';
+  } catch {
+    return false;
+  }
+};
+
+const MAX_AGENT_CANDIDATES = 150;
+
+const inViewport = (el: Element): boolean => {
+  const r = el.getBoundingClientRect();
+  return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+};
+
 export const agentSnapshot = (): AgentSnapshot => {
-  const els = deepQueryAll(AGENT_SELECTOR)
-    .filter((el) => onPage(el) && hasClickAffordance(el))
-    .slice(0, 150);
+  const all = deepQueryAll('*').filter(
+    (el) => ((el.matches(AGENT_SELECTOR) && hasClickAffordance(el)) || isPointerTarget(el)) && onPage(el),
+  );
+  // Over the cap, keep what's on screen first, then restore page order.
+  let els = all;
+  if (all.length > MAX_AGENT_CANDIDATES) {
+    const keep = new Set(
+      [...all.filter(inViewport), ...all.filter((el) => !inViewport(el))].slice(0, MAX_AGENT_CANDIDATES),
+    );
+    els = all.filter((el) => keep.has(el));
+  }
   return {
     candidates: describe(els, true),
     pageText: (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 3000),
