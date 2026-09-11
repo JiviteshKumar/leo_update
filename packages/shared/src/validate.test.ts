@@ -69,6 +69,12 @@ describe('validateWorkflow', () => {
     expect(r.ok && r.value[2]).toEqual({ type: 'switch-tab', urlHint: '' });
   });
 
+  test('accepts drag steps and clamps positions into the box', () => {
+    const r = validateSteps([{ type: 'drag', from: target, to: target, fromPos: { x: 0.2, y: 0.5 }, toPos: { x: 1.4, y: -1 } }]);
+    expect(r.ok && r.value[0]).toMatchObject({ type: 'drag', fromPos: { x: 0.2, y: 0.5 }, toPos: { x: 1, y: 0 } });
+    expect(validateSteps([{ type: 'drag', from: target }]).ok).toBe(false);
+  });
+
   test('keeps key modifiers and drops false ones', () => {
     const r = validateSteps([{ type: 'key', key: 'k', mods: { ctrl: true, shift: false } }]);
     expect(r.ok && r.value[0]).toEqual({ type: 'key', key: 'k', mods: { ctrl: true } });

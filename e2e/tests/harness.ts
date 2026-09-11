@@ -21,6 +21,7 @@ export interface RunInfo {
   status: 'running' | 'waiting-user' | 'step-failed' | 'done' | 'error' | 'cancelled';
   error?: string;
   healedSteps: number[];
+  log: { index: number; type: string; outcome: string; ms: number; error?: string; screenshot?: boolean }[];
 }
 export interface HookState {
   rec: { steps: Workflow['steps'] } | null;
@@ -41,6 +42,7 @@ type HookFn =
   | 'skipStep'
   | 'cancelRun'
   | 'resumeRun'
+  | 'failureShot'
   | 'runLog';
 
 export class Leo {
@@ -138,8 +140,12 @@ export const test = base.extend<{ context: BrowserContext; leo: Leo }>({
       ...(executablePath ? { executablePath } : { channel: 'chromium' }),
       headless: process.env.HEADED !== '1',
       viewport: { width: 1280, height: 800 },
+      // Fixed locale so date inputs use mm/dd/yyyy regardless of the machine.
+      locale: 'en-US',
       acceptDownloads: true,
-      args: [`--disable-extensions-except=${EXTENSION_DIR}`, `--load-extension=${EXTENSION_DIR}`],
+      // --lang fixes the browser UI language, which decides the field
+      // order of date inputs (the page locale alone doesn't).
+      args: [`--disable-extensions-except=${EXTENSION_DIR}`, `--load-extension=${EXTENSION_DIR}`, '--lang=en-US'],
     });
     await use(context);
     await context.close();

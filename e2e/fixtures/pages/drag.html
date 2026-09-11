@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Leo fixture: drag and drop</title>
+  <style>
+    body { font: 15px system-ui; margin: 40px; }
+    .board { display: flex; gap: 24px; }
+    .col { width: 200px; min-height: 140px; border: 2px dashed #999; padding: 8px; }
+    .card { background: #eef; border: 1px solid #99c; padding: 8px; margin: 6px 0; cursor: grab; }
+    #list { list-style: none; padding: 0; width: 220px; margin-top: 32px; }
+    #list li { background: #efe; border: 1px solid #9c9; padding: 10px; margin: 4px 0; cursor: grab; user-select: none; }
+    #vol { width: 300px; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <h1>Drag and drop</h1>
+
+  <!-- HTML5 drag-and-drop (kanban). -->
+  <div class="board">
+    <div class="col" id="todo" data-col="todo"><h3>To do</h3>
+      <div class="card" draggable="true" id="card-1">Invoice #1</div>
+      <div class="card" draggable="true" id="card-2">Invoice #2</div>
+    </div>
+    <div class="col" id="done" data-col="done"><h3>Done</h3></div>
+  </div>
+
+  <!-- Pointer-based sortable list (no HTML5 drag events). -->
+  <ul id="list">
+    <li data-id="alpha">Alpha</li>
+    <li data-id="beta">Beta</li>
+    <li data-id="gamma">Gamma</li>
+  </ul>
+
+  <input id="vol" type="range" min="0" max="100" value="0">
+
+  <button id="report" type="button">Report</button>
+  <pre id="result"></pre>
+
+  <script>
+    // Kanban
+    document.querySelectorAll('.card').forEach((c) =>
+      c.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', c.id)),
+    );
+    document.querySelectorAll('.col').forEach((col) => {
+      col.addEventListener('dragover', (e) => e.preventDefault());
+      col.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const card = document.getElementById(e.dataTransfer.getData('text/plain'));
+        if (card) col.appendChild(card);
+      });
+    });
+
+    // Sortable list
+    const list = document.getElementById('list');
+    let dragging = null;
+    let startY = 0;
+    list.addEventListener('pointerdown', (e) => {
+      dragging = e.target.closest('li');
+      if (!dragging) return;
+      startY = e.clientY;
+      dragging.setPointerCapture(e.pointerId);
+    });
+    list.addEventListener('pointermove', (e) => {
+      if (dragging) dragging.style.transform = `translateY(${e.clientY - startY}px)`;
+    });
+    list.addEventListener('pointerup', (e) => {
+      if (!dragging) return;
+      const item = dragging;
+      dragging = null;
+      item.style.transform = '';
+      const over = document.elementsFromPoint(e.clientX, e.clientY)
+        .find((el) => el.tagName === 'LI' && el !== item && list.contains(el));
+      if (!over) return;
+      const r = over.getBoundingClientRect();
+      if (e.clientY > r.top + r.height / 2) over.after(item);
+      else over.before(item);
+    });
+
+    document.getElementById('report').addEventListener('click', () => {
+      document.getElementById('result').textContent = JSON.stringify({
+        done: [...document.querySelectorAll('#done .card')].map((c) => c.id),
+        order: [...list.children].map((li) => li.dataset.id),
+        volume: Number(document.getElementById('vol').value),
+      });
+    });
+  </script>
+</body>
+</html>

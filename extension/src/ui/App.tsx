@@ -291,6 +291,9 @@ export function App() {
       {(run.status === 'error' || run.status === 'step-failed') && (
         <p className="error">{run.error}</p>
       )}
+      {(run.status === 'error' || run.status === 'step-failed') && run.log.some((e) => e.screenshot) && (
+        <FailureShot key={`${run.workflowId}:${run.startedAt}:${run.log.length}`} />
+      )}
       <div className="row">
         {run.status === 'waiting-user' && (
           <button className="primary" onClick={() => void send({ kind: 'panel.continueRun' })}>
@@ -540,6 +543,37 @@ export function App() {
         </section>
       )}
     </div>
+  );
+}
+
+// What the page looked like when the step failed, fetched on demand (it's a
+// few hundred KB, so it isn't part of the polled state).
+function FailureShot() {
+  const [open, setOpen] = useState(false);
+  const [shot, setShot] = useState<string | null | undefined>(undefined);
+  if (!open) {
+    return (
+      <button
+        className="link"
+        onClick={() => {
+          setOpen(true);
+          void send<{ dataUrl: string | null }>({ kind: 'panel.getFailureShot' }).then((r) =>
+            setShot(r?.dataUrl ?? null),
+          );
+        }}
+      >
+        Show the page when it failed
+      </button>
+    );
+  }
+  if (shot === undefined) return <p className="hint">Loading…</p>;
+  if (shot === null) return <p className="hint">No screenshot was captured.</p>;
+  return (
+    <img
+      src={shot}
+      alt="The page when the step failed"
+      style={{ width: '100%', border: '1px solid #444', borderRadius: 6, marginTop: 6 }}
+    />
   );
 }
 

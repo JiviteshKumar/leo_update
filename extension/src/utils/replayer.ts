@@ -14,11 +14,13 @@ import type {
   AgentAction,
   AgentSnapshot,
   Candidate,
+  DragStep,
   ElementStep,
   ExecResult,
   KeyMods,
   KeyStep,
   LocateResult,
+  RelPoint,
   Step,
   TargetInfo,
 } from './types';
@@ -95,7 +97,12 @@ type Actionable = { ok: true; x: number; y: number } | { ok: false; error: strin
 const isDisabled = (el: Element): boolean =>
   (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true';
 
-const waitActionable = async (el: Element, fast: boolean, timeoutMs = ACTION_TIMEOUT_MS): Promise<Actionable> => {
+const waitActionable = async (
+  el: Element,
+  fast: boolean,
+  timeoutMs = ACTION_TIMEOUT_MS,
+  pos: RelPoint = { x: 0.5, y: 0.5 },
+): Promise<Actionable> => {
   const deadline = Date.now() + timeoutMs;
   let reason = 'it never became ready';
   let scrolls = 0;
@@ -109,8 +116,8 @@ const waitActionable = async (el: Element, fast: boolean, timeoutMs = ACTION_TIM
     } else if (isDisabled(el)) {
       reason = 'it is disabled';
     } else {
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
+      const cx = r.left + r.width * pos.x;
+      const cy = r.top + r.height * pos.y;
       if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) {
         if (scrolls++ < 5) {
           el.scrollIntoView({ block: 'center', inline: 'center', behavior: fast ? 'auto' : 'smooth' });
@@ -124,8 +131,8 @@ const waitActionable = async (el: Element, fast: boolean, timeoutMs = ACTION_TIM
         if (Math.abs(r2.left - r.left) > 1 || Math.abs(r2.top - r.top) > 1) {
           reason = 'it is still moving';
         } else {
-          const x = r2.left + r2.width / 2;
-          const y = r2.top + r2.height / 2;
+          const x = r2.left + r2.width * pos.x;
+          const y = r2.top + r2.height * pos.y;
           const hit = deepElementFromPoint(x, y);
           if (hit && composedContains(el, hit)) return { ok: true, x, y };
           // An icon with pointer-events:none inside a button: the button
@@ -150,8 +157,13 @@ const waitActionable = async (el: Element, fast: boolean, timeoutMs = ACTION_TIM
 // focus/setValue act on it.
 let lastLocated: Element | null = null;
 
-const pointAt = async (el: Element, fast: boolean, withSelectors: boolean): Promise<LocateResult> => {
-  const a = await waitActionable(el, fast);
+const pointAt = async (
+  el: Element,
+  fast: boolean,
+  withSelectors: boolean,
+  pos?: RelPoint,
+): Promise<LocateResult> => {
+  const a = await waitActionable(el, fast, ACTION_TIMEOUT_MS, pos);
   if (!a.ok) return { ok: false, error: a.error };
   lastLocated = el;
   let off: { x: number; y: number };
@@ -166,22 +178,91 @@ const pointAt = async (el: Element, fast: boolean, withSelectors: boolean): Prom
     ok: true,
     x: Math.round(a.x + off.x),
     y: Math.round(a.y + off.y),
+    ...(el.tagName === 'INPUT' ? { inputType: (el as HTMLInputElement).type } : {}),
     ...(withSelectors ? { healedSelectors: generateSelectors(el) } : {}),
   };
 };
 
-export const locate = async (target: TargetInfo, fast: boolean, timeoutMs?: number): Promise<LocateResult> => {
-  const el = await waitForTarget(target, timeoutMs);
-  if (!el) {
-    return {
-      ok: false,
-      notFound: true,
-      candidates: collectCandidates(),
-      pageTitle: document.title,
-      pageUrl: location.href,
-    };
+// Parent element across shadow boundaries.
+const composedParent = (el: Element): Element | null =>
+  el.parentElement ?? ((el.getRootNode() as ShadowRoot).host ?? null);
+
+// Where to hover to reveal a hidden element: the center of its nearest
+// visible ancestor (a menu's <li>, a card with hover actions).
+const hoverPointFor = (el: Element): { x: number; y: number } | null => {
+  for (let n = composedParent(el); n && n !== document.body && n !== document.documentElement; n = composedParent(n)) {
+    const r = n.getBoundingClientRect();
+    if (!isVisible(n) || r.width === 0 || r.height === 0) continue;
+    if (r.bottom < 0 || r.top > innerHeight) n.scrollIntoView({ block: 'center', behavior: 'auto' });
+    const r2 = n.getBoundingClientRect();
+    // Aim at the part of the ancestor that is actually on screen.
+    const left = Math.max(r2.left, 0);
+    const right = Math.min(r2.right, innerWidth);
+    const top = Math.max(r2.top, 0);
+    const bottom = Math.min(r2.bottom, innerHeight);
+    if (right <= left || bottom <= top) continue;
+    return { x: (left + right) / 2, y: (top + bottom) / 2 };
   }
-  return pointAt(el, fast, false);
+  return null;
+};
+
+// How long to wait for a hidden element to appear on its own before asking
+// for a hover to reveal it.
+const HOVER_AFTER_MS = 1_500;
+
+export const locate = async (
+  target: TargetInfo,
+  fast: boolean,
+  timeoutMs = FIND_TIMEOUT_MS,
+  pos?: RelPoint,
+  allowHover = true,
+): Promise<LocateResult> => {
+  const start = Date.now();
+  for (;;) {
+    if (document.readyState !== 'loading') {
+      const el = findTarget(target);
+      if (el) return pointAt(el, fast, false, pos);
+      if (allowHover && Date.now() - start >= HOVER_AFTER_MS) {
+        const hidden = findTarget(target, { allowHidden: true });
+        const at = hidden ? hoverPointFor(hidden) : null;
+        if (at) {
+          try {
+            const off = await frameOffset();
+            return { ok: false, hover: { x: Math.round(at.x + off.x), y: Math.round(at.y + off.y) } };
+          } catch {
+            // can't place the frame; fall through to waiting
+          }
+        }
+      }
+    }
+    if (Date.now() - start >= timeoutMs) break;
+    await sleep(250);
+  }
+  return {
+    ok: false,
+    notFound: true,
+    candidates: collectCandidates(),
+    pageTitle: document.title,
+    pageUrl: location.href,
+  };
+};
+
+// Compatible mode can't move the real mouse; hover handlers written in JS
+// (mouseenter/mouseover) still respond to page-level events.
+const syntheticHover = (el: Element): boolean => {
+  const chain: Element[] = [];
+  for (let n = composedParent(el); n && n !== document.body; n = composedParent(n)) {
+    if (isVisible(n)) chain.unshift(n);
+  }
+  if (!chain.length) return false;
+  for (const n of chain) {
+    const r = n.getBoundingClientRect();
+    const init = mouseEventInit(r.left + r.width / 2, r.top + r.height / 2);
+    n.dispatchEvent(new PointerEvent('pointerover', { ...init, pointerId: 1 }));
+    n.dispatchEvent(new MouseEvent('mouseover', init));
+    n.dispatchEvent(new MouseEvent('mouseenter', { ...init, bubbles: false }));
+  }
+  return true;
 };
 
 export const locateCandidate = async (index: number, fast: boolean): Promise<LocateResult> => {
@@ -415,7 +496,12 @@ export const execStep = async (step: ElementStep | KeyStep, fast = false): Promi
       dispatchKey(focusTarget, step.key, step.mods);
       return { ok: true };
     }
-    const el = await waitForTarget(step.target);
+    let el = await waitForTarget(step.target);
+    if (!el) {
+      // A hidden element (menu item): try revealing it by hovering.
+      const hidden = findTarget(step.target, { allowHidden: true });
+      if (hidden && syntheticHover(hidden)) el = await waitForTarget(step.target, 3_000);
+    }
     if (!el) {
       return {
         ok: false,
@@ -574,6 +660,47 @@ export const agentAct = async (action: AgentAction): Promise<ExecResult> => {
     }
     cursorHide();
     return { ok: true, healedSelectors: generateSelectors(el) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+// Compatible-mode drag: HTML5 drag events with a shared DataTransfer, plus
+// the pointer/mouse sequence pointer-based drag libraries listen for.
+export const execDrag = async (step: DragStep, fast: boolean): Promise<ExecResult> => {
+  try {
+    const from = await waitForTarget(step.from);
+    if (!from) return { ok: false, error: `drag source not found: ${step.from.intent}` };
+    const a = await waitActionable(from, fast, ACTION_TIMEOUT_MS, step.fromPos);
+    if (!a.ok) return { ok: false, error: a.error };
+    const to = await waitForTarget(step.to);
+    if (!to) return { ok: false, error: `drop target not found: ${step.to.intent}` };
+    const r = to.getBoundingClientRect();
+    const tx = r.left + r.width * (step.toPos?.x ?? 0.5);
+    const ty = r.top + r.height * (step.toPos?.y ?? 0.5);
+
+    const dt = new DataTransfer();
+    const drag = (type: string, el: Element, x: number, y: number) =>
+      el.dispatchEvent(new DragEvent(type, { ...mouseEventInit(x, y), dataTransfer: dt }));
+    from.dispatchEvent(new PointerEvent('pointerdown', { ...mouseEventInit(a.x, a.y), pointerId: 1, buttons: 1 }));
+    from.dispatchEvent(new MouseEvent('mousedown', { ...mouseEventInit(a.x, a.y), buttons: 1 }));
+    drag('dragstart', from, a.x, a.y);
+    const steps = 8;
+    for (let n = 1; n <= steps; n++) {
+      const x = a.x + ((tx - a.x) * n) / steps;
+      const y = a.y + ((ty - a.y) * n) / steps;
+      const over = deepElementFromPoint(x, y) ?? to;
+      over.dispatchEvent(new PointerEvent('pointermove', { ...mouseEventInit(x, y), pointerId: 1, buttons: 1 }));
+      over.dispatchEvent(new MouseEvent('mousemove', { ...mouseEventInit(x, y), buttons: 1 }));
+      await sleep(16);
+    }
+    drag('dragenter', to, tx, ty);
+    drag('dragover', to, tx, ty);
+    drag('drop', to, tx, ty);
+    drag('dragend', from, tx, ty);
+    to.dispatchEvent(new PointerEvent('pointerup', { ...mouseEventInit(tx, ty), pointerId: 1 }));
+    to.dispatchEvent(new MouseEvent('mouseup', mouseEventInit(tx, ty)));
+    return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

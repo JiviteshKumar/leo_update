@@ -239,6 +239,8 @@ export const buildTarget = (el: Element, action: string): TargetInfo => {
   else if (action === 'select') intent = `Choose an option in the "${label}" dropdown`;
   else if (action === 'upload') intent = `Choose a file for the "${label}" field`;
   // A checkbox's "text" is its value ("on"); name it by its label instead.
+  else if (action === 'drag') intent = text ? `Drag "${text}"` : `Drag the ${tag} element`;
+  else if (action === 'drop') intent = text ? `Drop onto "${text}"` : `Drop onto the ${tag} element`;
   else if (inputType === 'checkbox') intent = `Toggle the "${label}" checkbox`;
   else if (inputType === 'radio') intent = `Select the "${label}" option`;
   else if (editable) intent = `Click into the "${label}"`;
@@ -294,13 +296,13 @@ export const deepQueryAll = (selector: string, scope: Scope = document): Element
 // Visible elements matching `base` whose text contains `needle`; an exact
 // match wins, otherwise the tightest (shortest-text) container — so
 // "Save" prefers a "Save" button over a "Save draft" button or a wrapper div.
-const byText = (scope: Scope, base: string, needleRaw: string): Element | null => {
+const byText = (scope: Scope, base: string, needleRaw: string, allowHidden = false): Element | null => {
   const needle = normalize(needleRaw).toLowerCase();
   let best: Element | null = null;
   let bestLen = Infinity;
   for (const n of Array.from(scope.querySelectorAll(base || '*'))) {
-    const text = normalize((n as HTMLElement).innerText ?? '').toLowerCase();
-    if (!text.includes(needle) || !isVisible(n)) continue;
+    const text = normalize((n as HTMLElement).innerText || n.textContent || '').toLowerCase();
+    if (!text.includes(needle) || (!allowHidden && !isVisible(n))) continue;
     if (text === needle) return n;
     if (text.length < bestLen) {
       best = n;
@@ -310,8 +312,9 @@ const byText = (scope: Scope, base: string, needleRaw: string): Element | null =
   return best;
 };
 
-// Resolve one selector (with >>> and :text= support) to a visible element.
-export const resolveSelector = (selector: string): Element | null => {
+// Resolve one selector (with >>> and :text= support) to a visible element
+// (or, with allowHidden, to one that exists but isn't shown).
+export const resolveSelector = (selector: string, allowHidden = false): Element | null => {
   const parts = selector.split(SHADOW);
   let scope: Scope = document;
   try {
@@ -320,10 +323,10 @@ export const resolveSelector = (selector: string): Element | null => {
       const last = i === parts.length - 1;
       const textMatch = /^(.*?):text=(.+)$/.exec(part);
       let el: Element | null;
-      if (textMatch) el = byText(scope, textMatch[1], textMatch[2]);
+      if (textMatch) el = byText(scope, textMatch[1], textMatch[2], allowHidden && last);
       else el = scope.querySelector(part);
       if (!el) return null;
-      if (last) return isVisible(el) ? el : null;
+      if (last) return allowHidden || isVisible(el) ? el : null;
       if (!el.shadowRoot) return null;
       scope = el.shadowRoot;
     }
@@ -354,10 +357,13 @@ export const plausibleMatch = (el: Element, target: TargetInfo): boolean => {
   return now === then || now.includes(then) || (now.length > 0 && then.includes(now));
 };
 
-// Replay: the element a recorded target points at, or null.
-export const findTarget = (target: TargetInfo): Element | null => {
+// Replay: the element a recorded target points at, or null. With
+// allowHidden, a present-but-hidden element (a closed menu's item) counts,
+// matched by strong selectors only.
+export const findTarget = (target: TargetInfo, opts: { allowHidden?: boolean } = {}): Element | null => {
   for (const sel of target.selectors) {
-    const el = resolveSelector(sel);
+    if (opts.allowHidden && isWeak(sel)) continue;
+    const el = resolveSelector(sel, opts.allowHidden);
     if (!el) continue;
     if (isWeak(sel) && !plausibleMatch(el, target)) continue;
     return el;

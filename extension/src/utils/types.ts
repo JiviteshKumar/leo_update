@@ -6,8 +6,10 @@ export * from '@leo/shared';
 import type {
   AgentAction,
   Candidate,
+  DragStep,
   ElementStep,
   KeyStep,
+  RelPoint,
   Step,
   TargetInfo,
   Workflow,
@@ -44,6 +46,8 @@ export interface RunLogEntry {
   outcome: 'ok' | 'healed' | 'skipped' | 'failed';
   ms: number;
   error?: string;
+  // A screenshot of the page was taken when this step failed.
+  screenshot?: boolean;
 }
 
 export interface RunState {
@@ -83,6 +87,8 @@ export interface RunRecord {
   error?: string;
   inputMode: RunState['inputMode'];
   steps: RunLogEntry[];
+  // JPEG data URL of the page at the last failed step.
+  screenshot?: string;
 }
 
 // Replay pacing. 'verbose' mirrors a human user (cursor glide, per-key
@@ -130,6 +136,8 @@ export type PanelMessage =
   | { kind: 'panel.retryStep' }
   // Continue a stopped run from the step it stopped at, in the same tab.
   | { kind: 'panel.resumeRun' }
+  // The screenshot taken when the current run's last step failed.
+  | { kind: 'panel.getFailureShot' }
   | { kind: 'panel.getSettings' }
   | { kind: 'panel.setSettings'; settings: Settings }
   | { kind: 'panel.getAccount'; refresh?: boolean }
@@ -150,7 +158,12 @@ export type BgToContentMessage =
   | { kind: 'replay.ping' }
   // Native input: find the element, wait until it can receive a click, and
   // report its center in top-level viewport coordinates for the debugger.
-  | { kind: 'replay.locate'; target: TargetInfo; fast?: boolean; timeoutMs?: number }
+  // `pos` picks the point inside the element (default: center). When the
+  // element exists but is hidden, the reply may ask for a hover first
+  // (menus that open on hover) unless `hover` is false.
+  | { kind: 'replay.locate'; target: TargetInfo; fast?: boolean; timeoutMs?: number; pos?: RelPoint; hover?: boolean }
+  // Compatible-mode drag with page-level events.
+  | { kind: 'replay.drag'; step: DragStep; fast?: boolean }
   | { kind: 'replay.locateCandidate'; index: number; framePath: string[]; fast?: boolean }
   // Follow-ups on the element the last locate returned in that frame.
   | { kind: 'replay.selectAll'; framePath: string[] }
@@ -187,8 +200,13 @@ export type ExecResult =
   | { ok: false; notFound?: false; error: string };
 
 export type LocateResult =
-  | { ok: true; x: number; y: number; healedSelectors?: string[] }
+  // `inputType` is set for <input> elements (date/time/range inputs are
+  // set directly rather than typed into).
+  | { ok: true; x: number; y: number; healedSelectors?: string[]; inputType?: string }
   | { ok: false; notFound: true; candidates: Candidate[]; pageTitle: string; pageUrl: string }
+  // The element exists but is hidden: move the mouse here (top-level
+  // coordinates) to reveal it, then locate again.
+  | { ok: false; notFound?: false; hover: { x: number; y: number } }
   | { ok: false; notFound?: false; error: string };
 
 export interface PanelState {

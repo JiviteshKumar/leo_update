@@ -66,6 +66,29 @@ const agentIndexByText = (body: Json, pickText: string): number | null => {
 
 let toolId = 0;
 
+// Live mode (LEO_E2E_LIVE_AI=1): /api/ai/* is answered by the real model,
+// through the same code the web app uses (fe/src/lib/ai/core.ts). AI keys
+// and provider settings come from the environment or fe/.env.local.
+type LiveFn = (body: unknown) => Promise<unknown>;
+let live: Record<string, LiveFn> | null = null;
+if (process.env.LEO_E2E_LIVE_AI === '1') {
+  const envFile = Bun.file(new URL('../../fe/.env.local', import.meta.url));
+  if (await envFile.exists()) {
+    for (const line of (await envFile.text()).split(/\r?\n/)) {
+      const m = /^\s*(ANTHROPIC_API_KEY|GROQ_API_KEY|LEO_AI_PROVIDER|LEO_AI_MODEL)\s*=\s*"?([^"#\r\n]*)"?/.exec(line);
+      if (m && m[2].trim() && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
+    }
+  }
+  const core = await import('../../fe/src/lib/ai/core');
+  const ai = core.createProvider();
+  live = {
+    heal: (b) => core.heal(b, ai),
+    objective: (b) => core.objective(b, ai),
+    agent: (b) => core.agentTurn(b, ai),
+  };
+  console.log(`live AI mode: ${ai.name} (${ai.model})`);
+}
+
 const answerAi = (kind: keyof MockState, body: Json): Response => {
   const next = mock[kind].shift();
   if (!next) return json({ error: `no ${kind} mock queued`, code: 'provider_error' }, 502);
@@ -116,6 +139,15 @@ const handler = async (req: Request): Promise<Response> => {
     const body = (await req.json().catch(() => ({}))) as Json;
     log.push({ path, body });
     if (!(kind in mock)) return json({ error: 'unknown', code: 'bad_request' }, 404);
+    if (live) {
+      try {
+        return json(await live[kind](body));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error('[live ai]', message);
+        return json({ error: message, code: 'provider_error' }, 502);
+      }
+    }
     return answerAi(kind, body);
   }
 

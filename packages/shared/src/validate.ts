@@ -1,4 +1,4 @@
-import type { KeyMods, KeyStep, Step, TargetInfo, Workflow } from './types';
+import type { DragStep, KeyMods, KeyStep, RelPoint, Step, TargetInfo, Workflow } from './types';
 
 // Structural validation for workflows crossing a trust boundary (the web
 // app's sync API, imports). Returns a normalized copy containing only known
@@ -60,6 +60,13 @@ const target = (v: unknown, path: string): TargetInfo => {
   return t;
 };
 
+const relPoint = (v: unknown, path: string): RelPoint | undefined => {
+  if (v === undefined || v === null) return undefined;
+  if (!isObj(v)) return fail(`${path} must be an object`);
+  const clamp = (n: number) => Math.min(1, Math.max(0, n));
+  return { x: clamp(num(v.x, `${path}.x`)), y: clamp(num(v.y, `${path}.y`)) };
+};
+
 const mods = (v: unknown, path: string): KeyMods | undefined => {
   if (v === undefined) return undefined;
   if (!isObj(v)) return fail(`${path} must be an object`);
@@ -112,6 +119,18 @@ export const parseStep = (v: unknown, path = 'step'): Step => {
       return { type: 'switch-tab', urlHint: str(v.urlHint ?? '', `${path}.urlHint`, { allowEmpty: true }) };
     case 'close-tab':
       return { type: 'close-tab' };
+    case 'drag': {
+      const step: DragStep = {
+        type: 'drag',
+        from: target(v.from, `${path}.from`),
+        to: target(v.to, `${path}.to`),
+      };
+      const fromPos = relPoint(v.fromPos, `${path}.fromPos`);
+      const toPos = relPoint(v.toPos, `${path}.toPos`);
+      if (fromPos) step.fromPos = fromPos;
+      if (toPos) step.toPos = toPos;
+      return step;
+    }
     case 'agent':
       return { type: 'agent', goal: str(v.goal, `${path}.goal`).trim() || fail(`${path}.goal must not be blank`) };
     default:

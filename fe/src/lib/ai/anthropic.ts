@@ -3,28 +3,26 @@ import { NextResponse } from 'next/server';
 import type { AiErrorBody, AiErrorCode } from '@leo/shared';
 import { hit, type RateLimit } from '@/lib/rate-limit';
 import { getSessionUser } from '@/lib/session';
+import { Refused, createProvider } from './core';
+import { NotConfigured, ProviderError, type AiProvider } from './providers';
 import { BadRequest } from './requests';
 
-// Server-side Anthropic access for Leo's AI features. The key never leaves
-// the server: the extension calls /api/ai/*, authenticated by the user's Leo
-// session, and these routes call Claude.
+// Shared wrapper for Leo's /api/ai/* routes. Keys never leave the server:
+// the extension calls these routes with the user's Leo session, and they
+// call the configured model provider (see ./providers).
 
-// One model for every AI call. Override with LEO_AI_MODEL.
-export const AI_MODEL = process.env.LEO_AI_MODEL || 'claude-sonnet-5';
+let provider: AiProvider | null = null;
+let providerError = '';
 
-// Responses include adaptive thinking on current models; leave room so the
-// answer itself is never truncated.
-export const AI_MAX_TOKENS = 16_000;
-
-let client: Anthropic | null = null;
-
-// Null when no credentials are configured (the SDK constructor throws).
-const getClient = (): Anthropic | null => {
-  if (client) return client;
+// Null when no provider is configured.
+const getProvider = (): AiProvider | null => {
+  if (provider) return provider;
   try {
-    client = new Anthropic();
-    return client;
-  } catch {
+    provider = createProvider();
+    console.info(`[ai] using ${provider.name} (${provider.model})`);
+    return provider;
+  } catch (err) {
+    providerError = err instanceof NotConfigured ? err.message : 'No AI provider is configured on the Leo server.';
     return null;
   }
 };
@@ -32,18 +30,12 @@ const getClient = (): Anthropic | null => {
 export const aiError = (status: number, code: AiErrorCode, error: string, init?: ResponseInit) =>
   NextResponse.json<AiErrorBody>({ error, code }, { ...init, status });
 
-export class Refused extends Error {}
-
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 
-// Shared wrapper for every /api/ai/* route: session auth, per-user rate
-// limit, JSON body parsing, and mapping of provider errors to AiErrorBody.
+// Session auth, per-user rate limit, JSON body parsing, and mapping of
+// provider errors to AiErrorBody.
 export const aiRoute =
-  <T>(
-    name: string,
-    limit: RateLimit,
-    handler: (body: unknown, client: Anthropic) => Promise<T>,
-  ) =>
+  <T>(name: string, limit: RateLimit, handler: (body: unknown, ai: AiProvider) => Promise<T>) =>
   async (req: Request): Promise<Response> => {
     const user = await getSessionUser();
     if (!user) return aiError(401, 'unauthorized', 'Sign in to Leo to use AI features.');
@@ -64,19 +56,25 @@ export const aiRoute =
       return aiError(400, 'bad_request', 'Body must be JSON.');
     }
 
-    const anthropic = getClient();
-    if (!anthropic) {
-      return aiError(503, 'not_configured', 'ANTHROPIC_API_KEY is not set on the Leo server.');
-    }
+    const ai = getProvider();
+    if (!ai) return aiError(503, 'not_configured', providerError);
 
     try {
-      return NextResponse.json(await handler(body, anthropic));
+      return NextResponse.json(await handler(body, ai));
     } catch (err) {
       if (err instanceof BadRequest) return aiError(400, 'bad_request', err.message);
       if (err instanceof Refused) return aiError(422, 'refused', 'The model declined this request.');
+      if (err instanceof ProviderError) {
+        console.error(`[ai:${name}] ${err.message}`);
+        if (err.status === 401 || err.status === 403) {
+          return aiError(502, 'provider_auth', "The server's AI key was rejected.");
+        }
+        if (err.status === 429) return aiError(429, 'provider_rate_limited', 'The AI provider is rate limiting requests.');
+        return aiError(502, 'provider_error', `AI provider error (${err.status}).`);
+      }
       if (err instanceof Anthropic.AuthenticationError) {
         console.error(`[ai:${name}] Anthropic rejected the server API key`);
-        return aiError(502, 'provider_auth', "The server's Anthropic API key was rejected.");
+        return aiError(502, 'provider_auth', "The server's AI key was rejected.");
       }
       if (err instanceof Anthropic.RateLimitError) {
         return aiError(429, 'provider_rate_limited', 'The AI provider is rate limiting requests.');
@@ -88,11 +86,11 @@ export const aiRoute =
         console.error(`[ai:${name}] Anthropic API error ${err.status}: ${err.message}`);
         return aiError(502, 'provider_error', `AI provider error (${err.status ?? 'unknown'}).`);
       }
+      if (err instanceof SyntaxError) {
+        console.error(`[ai:${name}] model returned malformed JSON`);
+        return aiError(502, 'provider_error', 'The model returned a malformed answer.');
+      }
       console.error(`[ai:${name}]`, err);
       return aiError(500, 'provider_error', 'Unexpected server error.');
     }
   };
-
-// Text of the first text block, for structured-output responses.
-export const firstText = (msg: Anthropic.Message): string =>
-  msg.content.find((b): b is Anthropic.TextBlock => b.type === 'text')?.text ?? '';

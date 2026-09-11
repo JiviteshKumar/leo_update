@@ -1,6 +1,6 @@
-import { buildTarget, fieldLabel } from './selectors';
+import { buildTarget, composedContains, fieldLabel } from './selectors';
 import { LEO_UI_HOST } from './types';
-import type { KeyMods, Step } from './types';
+import type { KeyMods, RelPoint, Step } from './types';
 
 // DOM event capture for recording. Attached in the capture phase on window
 // so the page can't stop events from reaching us. Only trusted (real user)
@@ -48,6 +48,34 @@ const isTextEntry = (el: Element): boolean => {
 const isFileInput = (el: Element): boolean =>
   el.tagName.toLowerCase() === 'input' && (el as HTMLInputElement).type === 'file';
 
+// Elements whose drags are gestures worth recording (a list item, a card,
+// a slider), as opposed to selecting text.
+const DRAGGABLE =
+  '[draggable="true"], li, tr, [role="option"], [role="listitem"], [role="row"], [role="slider"], ' +
+  'input[type="range"], [class*="drag"], [class*="sortable"], [class*="handle"], [class*="card"]';
+
+const DRAG_THRESHOLD_PX = 12;
+
+const relPos = (el: Element, x: number, y: number): RelPoint => {
+  const r = el.getBoundingClientRect();
+  const clamp = (n: number) => Math.round(Math.min(1, Math.max(0, n)) * 1000) / 1000;
+  return {
+    x: r.width ? clamp((x - r.left) / r.width) : 0.5,
+    y: r.height ? clamp((y - r.top) / r.height) : 0.5,
+  };
+};
+
+// The element under a point that isn't the thing being dragged (which
+// often follows the pointer) or Leo's own UI.
+const dropTargetAt = (x: number, y: number, dragged: Element): Element | null => {
+  for (const el of document.elementsFromPoint(x, y)) {
+    if (composedContains(dragged, el) || el.tagName.toLowerCase() === LEO_UI_HOST) continue;
+    if (el === document.documentElement) continue;
+    return el;
+  }
+  return null;
+};
+
 // For contenteditable, the editing host (the element with contenteditable),
 // not whichever inner <p>/<span> the caret sits in.
 const editingHost = (el: Element): Element => {
@@ -68,6 +96,13 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   // either way it fires a click with no mouse behind it (detail === 0) that
   // is a consequence of the key step, not an action of its own.
   let lastEnterAt = 0;
+  // Drag tracking. A finished drag also fires a click (press and release
+  // on the same moved element); that click is part of the drag.
+  let down: { el: Element; x: number; y: number } | null = null;
+  let html5From: { el: Element; pos: RelPoint } | null = null;
+  // The click a finished drag fires lands on the dragged element (or an
+  // ancestor both ends share); only that click is swallowed.
+  let dragClick: { el: Element; until: number } | null = null;
 
   const flush = () => {
     if (!pending) return;
@@ -82,6 +117,10 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
     // the Enter reproduces it, so recording it too would act twice.
     if (ev.detail === 0 && Date.now() - lastEnterAt < 1_000) return;
     const raw = realTarget(ev);
+    if (dragClick && Date.now() < dragClick.until && raw && (composedContains(dragClick.el, raw) || composedContains(raw, dragClick.el))) {
+      dragClick = null;
+      return;
+    }
     if (!raw) return;
     const el = (raw.closest?.(CLICKABLE) as Element | null) ?? raw;
 
@@ -229,6 +268,60 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
     });
   };
 
+  const emitDrag = (from: Element, to: Element, fromPos: RelPoint, toPos: RelPoint) => {
+    flush();
+    emit({ type: 'drag', from: buildTarget(from, 'drag'), to: buildTarget(to, 'drop'), fromPos, toPos });
+    dragClick = { el: from, until: Date.now() + 500 };
+  };
+
+  const onPointerDown = (ev: PointerEvent) => {
+    if (!ev.isTrusted || isLeoEvent(ev) || ev.button !== 0) return;
+    const raw = realTarget(ev);
+    down = raw ? { el: raw, x: ev.clientX, y: ev.clientY } : null;
+  };
+
+  // HTML5 drag-and-drop: dragstart … drop. (The browser swallows pointerup
+  // during a native drag, so these events carry the gesture.)
+  const onDragStart = (ev: DragEvent) => {
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
+    const raw = realTarget(ev);
+    if (!raw) return;
+    const el = (raw.closest?.('[draggable="true"]') as Element | null) ?? raw;
+    const start = down && composedContains(el, down.el) ? down : null;
+    html5From = { el, pos: start ? relPos(el, start.x, start.y) : { x: 0.5, y: 0.5 } };
+  };
+
+  const onDrop = (ev: DragEvent) => {
+    if (!ev.isTrusted || isLeoEvent(ev) || !html5From) return;
+    const from = html5From;
+    html5From = null;
+    down = null;
+    const to = dropTargetAt(ev.clientX, ev.clientY, from.el) ?? realTarget(ev);
+    if (!to) return;
+    emitDrag(from.el, to, from.pos, relPos(to, ev.clientX, ev.clientY));
+  };
+
+  const onDragEnd = () => {
+    html5From = null;
+  };
+
+  // Pointer drags: press, move past a threshold, release.
+  const onPointerUp = (ev: PointerEvent) => {
+    if (!ev.isTrusted || !down || html5From) return;
+    const start = down;
+    down = null;
+    if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD_PX) return;
+    if (isTextEntry(start.el)) return; // selecting text in a field
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return; // selecting page text
+    const from = (start.el.closest?.(DRAGGABLE) as Element | null) ?? null;
+    if (!from) return;
+    // A slider's drag starts and ends on the slider itself.
+    const isSlider = from.matches('input[type="range"], [role="slider"]');
+    const to = isSlider ? from : (dropTargetAt(ev.clientX, ev.clientY, from) ?? from);
+    emitDrag(from, to, relPos(from, start.x, start.y), relPos(to, ev.clientX, ev.clientY));
+  };
+
   const onBlur = (ev: FocusEvent) => {
     if (isLeoEvent(ev)) return;
     const el = realTarget(ev);
@@ -247,6 +340,11 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
     ['change', onChange],
     ['keydown', onKeyDown as EventListener],
     ['blur', onBlur as EventListener],
+    ['pointerdown', onPointerDown as EventListener],
+    ['pointerup', onPointerUp as EventListener],
+    ['dragstart', onDragStart as EventListener],
+    ['drop', onDrop as EventListener],
+    ['dragend', onDragEnd],
     ['pagehide', onPageHide],
   ];
   for (const [type, fn] of listeners) window.addEventListener(type, fn, true);

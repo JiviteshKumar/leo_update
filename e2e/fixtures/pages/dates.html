@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Leo fixture: dates</title>
+  <style>
+    body { font: 15px system-ui; margin: 40px; }
+    #cal { width: 260px; border: 1px solid #999; padding: 8px; margin-top: 16px; }
+    .cal-head { display: flex; justify-content: space-between; align-items: center; }
+    .cal-head span.nav { cursor: pointer; padding: 2px 8px; }
+    .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-top: 6px; }
+    .grid span { text-align: center; padding: 4px 0; cursor: pointer; }
+    .grid span:hover { background: #def; }
+  </style>
+</head>
+<body>
+  <h1>Dates</h1>
+  <label>Due date <input id="due" type="date"></label>
+
+  <!-- A custom date picker like most sites use: attribute-poor spans. -->
+  <div id="cal">
+    <div class="cal-head">
+      <span class="nav prev">‹</span><strong class="title"></strong><span class="nav next">›</span>
+    </div>
+    <div class="grid"></div>
+  </div>
+  <p>Picked: <span id="picked"></span></p>
+
+  <button id="done" type="button">Done</button>
+  <pre id="result"></pre>
+
+  <script>
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const today = new Date();
+    let y = today.getFullYear();
+    let m = today.getMonth();
+    let picked = '';
+    const pad = (n) => String(n).padStart(2, '0');
+    const render = () => {
+      document.querySelector('#cal .title').textContent = `${MONTHS[m]} ${y}`;
+      const grid = document.querySelector('#cal .grid');
+      grid.innerHTML = '';
+      const days = new Date(y, m + 1, 0).getDate();
+      const lead = new Date(y, m, 1).getDay();
+      for (let i = 0; i < lead; i++) grid.appendChild(document.createElement('i'));
+      for (let d = 1; d <= days; d++) {
+        const s = document.createElement('span');
+        s.textContent = d;
+        s.addEventListener('click', () => {
+          picked = `${y}-${pad(m + 1)}-${pad(d)}`;
+          document.getElementById('picked').textContent = picked;
+        });
+        grid.appendChild(s);
+      }
+    };
+    document.querySelector('#cal .prev').addEventListener('click', () => { if (--m < 0) { m = 11; y--; } render(); });
+    document.querySelector('#cal .next').addEventListener('click', () => { if (++m > 11) { m = 0; y++; } render(); });
+    render();
+    document.getElementById('done').addEventListener('click', () => {
+      document.getElementById('result').textContent = JSON.stringify({
+        due: document.getElementById('due').value,
+        picked,
+      });
+    });
+  </script>
+</body>
+</html>

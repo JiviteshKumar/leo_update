@@ -28,6 +28,8 @@ export const describeStep = (step: Step): string => {
       return 'Continue in the new tab';
     case 'close-tab':
       return 'Return to the previous tab';
+    case 'drag':
+      return `Drag ${targetName(step.from)} onto ${targetName(step.to)}`;
     case 'agent':
       return `AI: ${step.goal}`;
   }
@@ -47,6 +49,8 @@ export const truncate = (s: string, max: number): string =>
   s.length > max ? `${s.slice(0, max)}…` : s;
 
 const lowerFirst = (s: string): string => (s ? s[0].toLowerCase() + s.slice(1) : s);
+
+const targetName = (t: TargetInfo): string => (t.text ? `"${truncate(t.text, 30)}"` : `the ${t.tag}`);
 
 // ---------------------------------------------------------------------------
 // Agent recovery helpers (pure, so they're unit-tested)

@@ -51,12 +51,25 @@ export type Step =
   // The current tab closed (e.g. a sign-in popup finishing); the workflow
   // continues in the tab that opened it.
   | { type: 'close-tab' }
+  // A drag from one element to another: HTML5 drag-and-drop (kanban
+  // boards), pointer drags (sortable lists), sliders. fromPos/toPos say
+  // where on each element the drag started and ended.
+  | { type: 'drag'; from: TargetInfo; to: TargetInfo; fromPos?: RelPoint; toPos?: RelPoint }
   // A natural-language goal achieved by the AI agent at run time. For dynamic
   // actions that can't be a fixed click — "select last month", "pick the first
   // available slot". Authored by the user, not recorded.
   | { type: 'agent'; goal: string };
 
 export type StepType = Step['type'];
+
+// A point inside an element's box, as fractions of its width and height
+// (0.5, 0.5 is the center).
+export interface RelPoint {
+  x: number;
+  y: number;
+}
+
+export type DragStep = Extract<Step, { type: 'drag' }>;
 
 export type ElementStep = Extract<Step, { type: 'click' | 'dblclick' | 'type' | 'select' }>;
 

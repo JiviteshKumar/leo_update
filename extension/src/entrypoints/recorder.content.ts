@@ -6,6 +6,7 @@ import {
   agentLocate,
   agentSnapshot,
   execCandidate,
+  execDrag,
   execStep,
   focusLocated,
   hideLeoUiAt,
@@ -125,7 +126,13 @@ export default defineContentScript({
         // Frame-targeted: only the frame the element lives in answers.
         case 'replay.locate':
           if (!matchesFrame(msg.target.framePath)) return false;
-          return reply(locate(msg.target, msg.fast === true, msg.timeoutMs), sendResponse);
+          return reply(
+            locate(msg.target, msg.fast === true, msg.timeoutMs, msg.pos, msg.hover !== false),
+            sendResponse,
+          );
+        case 'replay.drag':
+          if (!matchesFrame(msg.step.from.framePath)) return false;
+          return reply(execDrag(msg.step, msg.fast === true), sendResponse);
         case 'replay.locateCandidate':
           if (!matchesFrame(msg.framePath)) return false;
           return reply(locateCandidate(msg.index, msg.fast === true), sendResponse);

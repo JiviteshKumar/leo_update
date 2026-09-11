@@ -18,6 +18,7 @@ import type {
   BgToContentMessage,
   Candidate,
   ContentMessage,
+  DragStep,
   ElementStep,
   ExecResult,
   KeyStep,
@@ -55,7 +56,11 @@ const MAX_RUN_LOGS = 20;
 
 const ACTIVE: readonly RunStatus[] = ['running', 'waiting-user', 'step-failed'];
 // Steps that act on the page; the page gets a moment to settle after each.
-const ACTING: readonly Step['type'][] = ['click', 'dblclick', 'type', 'select', 'key', 'agent'];
+const ACTING: readonly Step['type'][] = ['click', 'dblclick', 'type', 'select', 'key', 'agent', 'drag'];
+
+// Inputs whose value is set directly rather than typed: typing into a date
+// or time field's segments, or at a slider, is unreliable.
+const SET_DIRECTLY = new Set(['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range']);
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const TIMEOUT = Symbol('timeout');
@@ -120,6 +125,8 @@ export default defineBackground(() => {
   // Resolves the step-failed pause with the user's choice.
   let failureResolver: ((choice: 'retry' | 'skip' | 'end') => void) | null = null;
   let keepalive: ReturnType<typeof setInterval> | null = null;
+  // JPEG data URL of the page when the current run's last step failed.
+  let failureShot: string | null = null;
   // Leo Cloud session, cached so the panel's poll doesn't hit fe every tick.
   let account: Account | null = null;
   let accountFetched = false;
@@ -438,9 +445,23 @@ export default defineBackground(() => {
     broadcast();
   };
 
-  const logStep = (index: number, type: Step['type'], outcome: RunLogEntry['outcome'], started: number, error?: string) => {
+  const logStep = (
+    index: number,
+    type: Step['type'],
+    outcome: RunLogEntry['outcome'],
+    started: number,
+    error?: string,
+    screenshot?: boolean,
+  ) => {
     if (!run) return;
-    const entry: RunLogEntry = { index, type, outcome, ms: Date.now() - started, ...(error ? { error } : {}) };
+    const entry: RunLogEntry = {
+      index,
+      type,
+      outcome,
+      ms: Date.now() - started,
+      ...(error ? { error } : {}),
+      ...(screenshot ? { screenshot } : {}),
+    };
     setRunStatus({ log: [...run.log, entry] });
   };
 
@@ -455,6 +476,7 @@ export default defineBackground(() => {
       error: run.error,
       inputMode: run.inputMode,
       steps: run.log,
+      ...(failureShot ? { screenshot: failureShot } : {}),
     };
     const res = await browser.storage.local.get(RUN_LOGS_KEY);
     const all = [record, ...((res[RUN_LOGS_KEY] as RunRecord[] | undefined) ?? [])].slice(0, MAX_RUN_LOGS);
@@ -690,6 +712,11 @@ export default defineBackground(() => {
     if (run && runActive() && reason === 'canceled_by_user') setRunStatus({ inputMode: 'compatible' });
   });
 
+  // Debugger events (e.g. Input.dragIntercepted) go to their tab's session.
+  browser.debugger.onEvent.addListener((source, method, params) => {
+    if (source.tabId != null) cdpSessions.get(source.tabId)?.onEvent(method, params);
+  });
+
   // Attach before the first step. Chrome's debugging bar resizes the
   // viewport as it appears, so let layout settle before anything measures.
   const prepareInput = async (tabId: number) => {
@@ -712,10 +739,11 @@ export default defineBackground(() => {
     }
   };
 
-  // Screenshot of the run tab for the vision agent, downscaled so 1 image px
-  // == 1 CSS px — candidate rects and click_at coordinates then line up with
-  // the image. Null on failure: that agent turn proceeds text-only.
-  const captureTab = async (tabId: number, dpr: number): Promise<string | null> => {
+  // Screenshot of the run tab (base64 JPEG). For the vision agent it is
+  // downscaled so 1 image px == 1 CSS px — candidate rects and click_at
+  // coordinates then line up with the image; `maxWidth` caps it for failure
+  // snapshots. Null on failure: that agent turn proceeds text-only.
+  const captureTab = async (tabId: number, dpr: number, maxWidth = Infinity): Promise<string | null> => {
     let b64: string | null = null;
     const cdp = await getCdp(tabId);
     if (cdp) b64 = await cdp.screenshot();
@@ -737,7 +765,7 @@ export default defineBackground(() => {
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
       // 8000px is the API's hard limit; 1/dpr is the 1:1-CSS-px scale.
-      const scale = Math.min(1 / (dpr || 1), 8000 / Math.max(bmp.width, bmp.height));
+      const scale = Math.min(1 / (dpr || 1), 8000 / Math.max(bmp.width, bmp.height), maxWidth / bmp.width);
       const w = Math.max(1, Math.round(bmp.width * scale));
       const h = Math.max(1, Math.round(bmp.height * scale));
       const canvas = new OffscreenCanvas(w, h);
@@ -824,10 +852,36 @@ export default defineBackground(() => {
     markHealed(i);
   };
 
+  // Locate, hovering to reveal the element first when it's hidden behind a
+  // hover menu (up to three levels of nested menus).
+  const locateRevealing = async (
+    tabId: number,
+    cdp: CdpTab,
+    msg: Extract<BgToContentMessage, { kind: 'replay.locate' }>,
+    fast: boolean,
+  ): Promise<LocateResult> => {
+    let loc = await locateInTab(tabId, msg);
+    for (let n = 0; n < 3; n++) {
+      if (loc.ok || !('hover' in loc)) return loc;
+      const at = loc.hover;
+      await guard(cdp, () => cdp.move(at.x, at.y));
+      await sleep(fast ? 250 : 450);
+      loc = await locateInTab(tabId, { ...msg, hover: n < 2 });
+    }
+    return loc;
+  };
+
+  const locateError = (loc: LocateResult): string => {
+    if (loc.ok) return '';
+    if (loc.notFound) return 'element not found';
+    if ('hover' in loc) return 'the element stayed hidden';
+    return loc.error;
+  };
+
   const performNative = async (
     tabId: number,
     step: Exclude<ElementStep, { type: 'select' }>,
-    at: { x: number; y: number },
+    at: { x: number; y: number; inputType?: string },
     cdp: CdpTab,
     fast: boolean,
   ) => {
@@ -841,12 +895,16 @@ export default defineBackground(() => {
         await guard(cdp, () => cdp.click(at.x, at.y, 2));
         break;
       case 'type': {
-        await guard(cdp, () => cdp.click(at.x, at.y));
-        await toFrames(tabId, { kind: 'replay.selectAll', framePath });
-        if (step.text) {
-          await guard(cdp, () => cdp.insertText(step.text, fast ? 0 : step.text.length > 40 ? 8 : 30));
+        if (at.inputType && SET_DIRECTLY.has(at.inputType)) {
+          await toFrames(tabId, { kind: 'replay.setValue', framePath, value: step.text });
         } else {
-          await guard(cdp, () => cdp.key('Backspace'));
+          await guard(cdp, () => cdp.click(at.x, at.y));
+          await toFrames(tabId, { kind: 'replay.selectAll', framePath });
+          if (step.text) {
+            await guard(cdp, () => cdp.insertText(step.text, fast ? 0 : step.text.length > 40 ? 8 : 30));
+          } else {
+            await guard(cdp, () => cdp.key('Backspace'));
+          }
         }
         const check = await toFrames<ExecResult>(tabId, { kind: 'replay.verify', framePath, value: step.text });
         if (check && !check.ok) {
@@ -871,7 +929,13 @@ export default defineBackground(() => {
     const tabId = run!.tabId;
     if (step.type === 'key') {
       if (step.target) {
-        const loc = await locateInTab(tabId, { kind: 'replay.locate', target: step.target, fast, timeoutMs: 3_000 });
+        const loc = await locateInTab(tabId, {
+          kind: 'replay.locate',
+          target: step.target,
+          fast,
+          timeoutMs: 3_000,
+          hover: false,
+        });
         if (loc.ok) await toFrames(tabId, { kind: 'replay.focus', framePath: step.target.framePath });
         // Not found: the key goes to whatever has focus — usually the field
         // typed into just before, which is where the user pressed it.
@@ -880,12 +944,12 @@ export default defineBackground(() => {
       return;
     }
 
-    const loc = await locateInTab(tabId, { kind: 'replay.locate', target: step.target, fast });
+    const loc = await locateRevealing(tabId, cdp, { kind: 'replay.locate', target: step.target, fast }, fast);
     if (loc.ok) {
       await performNative(tabId, step, loc, cdp, fast);
       return;
     }
-    if (!loc.notFound) throw new Error(`${step.target.intent}: ${loc.error}`);
+    if (!loc.notFound) throw new Error(`${step.target.intent}: ${locateError(loc)}`);
 
     const index = await askHealer(workflow, i, step, loc);
     if (index == null) return; // the vision agent did the action
@@ -917,6 +981,36 @@ export default defineBackground(() => {
     }
     if (healed.healedSelectors?.length) await patchStepSelectors(workflow, i, healed.healedSelectors);
     markHealed(i);
+  };
+
+  // Drags (HTML5 drag-and-drop, sortable lists, sliders) with real mouse
+  // input; page-level events when the debugger isn't available.
+  const execDragStep = async (step: DragStep, fast: boolean) => {
+    const tabId = run!.tabId;
+    const cdp = await getCdp(tabId);
+    if (cdp) {
+      try {
+        const fromMsg = { kind: 'replay.locate' as const, target: step.from, fast, pos: step.fromPos };
+        let from = await locateRevealing(tabId, cdp, fromMsg, fast);
+        if (!from.ok) throw new Error(`Drag start (${step.from.intent}): ${locateError(from)}`);
+        const to = await locateInTab(tabId, { kind: 'replay.locate', target: step.to, fast, pos: step.toPos, hover: false });
+        if (!to.ok) throw new Error(`Drop target (${step.to.intent}): ${locateError(to)}`);
+        // Bringing the drop target into view may have scrolled the page;
+        // measure the start again.
+        from = await locateInTab(tabId, { ...fromMsg, fast: true, hover: false });
+        if (!from.ok) throw new Error(`Drag start (${step.from.intent}): ${locateError(from)}`);
+        await toTop(tabId, { kind: 'ui.clearPoint', x: from.x, y: from.y }, 2_000);
+        await toTop(tabId, { kind: 'ui.clearPoint', x: to.x, y: to.y }, 2_000);
+        const start = from;
+        await guard(cdp, () => cdp.drag(start, to, fast ? 8 : 16));
+        return;
+      } catch (err) {
+        if (!(err instanceof InputLost)) throw err;
+        setRunStatus({ inputMode: 'compatible' });
+      }
+    }
+    const res = await execInTab(tabId, { kind: 'replay.drag', step, fast });
+    if (!res.ok) throw new Error('error' in res ? res.error : 'the drag could not be performed');
   };
 
   const execElement = async (workflow: Workflow, i: number, step: ElementStep | KeyStep, fast: boolean) => {
@@ -1161,6 +1255,9 @@ export default defineBackground(() => {
       case 'agent':
         await runAgentStepInTab(step.goal, workflow.objective);
         break;
+      case 'drag':
+        await execDragStep(step, fast);
+        break;
     }
     if (ACTING.includes(step.type)) await settle(run!.tabId, fast);
   };
@@ -1201,7 +1298,10 @@ export default defineBackground(() => {
             return;
           }
           const message = errorMessage(err);
-          logStep(i, step.type, 'failed', started, message);
+          // What the page looked like when the step failed.
+          const shot = await captureTab(run!.tabId, 1, 960).catch(() => null);
+          failureShot = shot ? `data:image/jpeg;base64,${shot}` : null;
+          logStep(i, step.type, 'failed', started, message, Boolean(shot));
           // Pause instead of aborting: the user decides whether to retry
           // the step, skip it, or end the run here.
           setRunStatus({ status: 'step-failed', error: message, agentNote: undefined });
@@ -1270,6 +1370,7 @@ export default defineBackground(() => {
 
     cancelRequested = false;
     runAbort = new AbortController();
+    failureShot = null;
     run = {
       workflowId: workflow.id,
       workflowName: workflow.name,
@@ -1438,6 +1539,8 @@ export default defineBackground(() => {
           case 'panel.cancelRun':
             cancelRun();
             return { ok: true };
+          case 'panel.getFailureShot':
+            return { dataUrl: failureShot };
           case 'panel.dismissRun':
             // Only a finished run can be dismissed; an active one must be
             // cancelled first.
@@ -1515,6 +1618,7 @@ export default defineBackground(() => {
         retryStep: () => void failureResolver?.('retry'),
         skipStep: () => void failureResolver?.('skip'),
         cancelRun: () => cancelRun(),
+        failureShot: () => failureShot,
         runLog: async () => (await browser.storage.local.get(RUN_LOGS_KEY))[RUN_LOGS_KEY] ?? [],
       },
     });

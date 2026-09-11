@@ -30,6 +30,12 @@ The extension never holds an API key: AI repair, AI steps and workflow
 naming go through `fe`'s `/api/ai/*` routes, authenticated by the user's Leo
 session and rate-limited per user.
 
+**AI provider.** `fe` uses Anthropic when `ANTHROPIC_API_KEY` is set, else
+Groq (`openai/gpt-oss-120b`) when `GROQ_API_KEY` is set; `LEO_AI_PROVIDER`
+and `LEO_AI_MODEL` override. GPT-OSS is text-only, so on Groq the agent
+works from the page's element list and text instead of screenshots — visual
+widgets are less reliable there than with Claude.
+
 ## Checks
 
 ```bash
@@ -47,6 +53,15 @@ somewhere it can run and point the suite at it:
 ```bash
 LEO_E2E_CHROMIUM="C:\path\to\chrome-win64\chrome.exe" bun run e2e
 ```
+
+Two opt-in suites:
+
+- `LEO_E2E_LIVE_AI=1` — AI calls go to the real model (key from the
+  environment or `fe/.env.local`) instead of mocks: repair of a redesigned
+  page, workflow naming, an AI step in a custom dropdown, and the agent on a
+  custom date picker. Costs a few cents.
+- `LEO_E2E_REAL_SITES=1` — record/replay on the-internet.herokuapp.com
+  (a public site built for testing automation tools). Needs internet.
 
 ## How replay works
 

@@ -119,6 +119,59 @@ export class CdpTab {
     }
   }
 
+  // Move the mouse without clicking (reveals hover menus).
+  async move(x: number, y: number): Promise<void> {
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
+  }
+
+  // Data of a native HTML5 drag the browser started during drag(), reported
+  // by the Input.dragIntercepted event.
+  private dragData: unknown = null;
+
+  // Debugger events for this tab, routed from chrome.debugger.onEvent.
+  onEvent(method: string, params: unknown): void {
+    if (method === 'Input.dragIntercepted') this.dragData = (params as { data?: unknown }).data ?? null;
+  }
+
+  // Press at `from`, move to `to` in small steps, release. Pointer-based
+  // drags (sortable lists, sliders) just need that. For HTML5 drag-and-drop
+  // the browser would start an OS-level drag, which automation can't drive,
+  // so drags are intercepted and the drop is delivered with
+  // Input.dispatchDragEvent instead.
+  async drag(from: { x: number; y: number }, to: { x: number; y: number }, steps = 12): Promise<void> {
+    let intercepting = false;
+    try {
+      await this.send('Input.setInterceptDrags', { enabled: true });
+      intercepting = true;
+    } catch {
+      // not supported: pointer drags still work
+    }
+    this.dragData = null;
+    const mouse = (type: string, x: number, y: number, extra: Record<string, unknown> = {}) =>
+      this.send('Input.dispatchMouseEvent', { type, x, y, ...extra });
+    try {
+      await mouse('mouseMoved', from.x, from.y, { button: 'none' });
+      await mouse('mousePressed', from.x, from.y, { button: 'left', buttons: 1, clickCount: 1 });
+      for (let n = 1; n <= steps; n++) {
+        const x = from.x + ((to.x - from.x) * n) / steps;
+        const y = from.y + ((to.y - from.y) * n) / steps;
+        await mouse('mouseMoved', x, y, { button: 'left', buttons: 1 });
+        await new Promise((r) => setTimeout(r, 16));
+      }
+      await new Promise((r) => setTimeout(r, 60));
+      if (this.dragData) {
+        const data = this.dragData;
+        for (const type of ['dragEnter', 'dragOver', 'drop']) {
+          await this.send('Input.dispatchDragEvent', { type, x: to.x, y: to.y, data });
+        }
+      }
+      await mouse('mouseReleased', to.x, to.y, { button: 'left', buttons: 0, clickCount: 1 });
+    } finally {
+      this.dragData = null;
+      if (intercepting) await this.send('Input.setInterceptDrags', { enabled: false }).catch(() => {});
+    }
+  }
+
   async wheel(x: number, y: number, deltaY: number): Promise<void> {
     await this.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY });
   }
