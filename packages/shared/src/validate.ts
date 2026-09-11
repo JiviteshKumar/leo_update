@@ -106,6 +106,12 @@ export const parseStep = (v: unknown, path = 'step'): Step => {
     }
     case 'download':
       return { type: 'download' };
+    case 'upload':
+      return { type: 'upload', target: target(v.target, `${path}.target`) };
+    case 'switch-tab':
+      return { type: 'switch-tab', urlHint: str(v.urlHint ?? '', `${path}.urlHint`, { allowEmpty: true }) };
+    case 'close-tab':
+      return { type: 'close-tab' };
     case 'agent':
       return { type: 'agent', goal: str(v.goal, `${path}.goal`).trim() || fail(`${path}.goal must not be blank`) };
     default:

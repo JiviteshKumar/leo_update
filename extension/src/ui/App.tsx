@@ -258,8 +258,15 @@ export function App() {
       </h2>
       {run.status === 'waiting-user' && (
         <p className="hint">
-          This step needs a password. Type it into the highlighted field on the
-          page, then press Continue. Leo never stores passwords.
+          {run.waitingFor === 'file'
+            ? 'This step needs a file. Choose it in the highlighted field on the page, then press Continue. Leo never stores your files.'
+            : 'This step needs a password. Type it into the highlighted field on the page, then press Continue. Leo never stores passwords.'}
+        </p>
+      )}
+      {running && run.inputMode === 'compatible' && (
+        <p className="hint">
+          Compatibility mode: Chrome&apos;s debugger isn&apos;t available, so Leo is using
+          page-level input. A few sites ignore it.
         </p>
       )}
       {run.status === 'step-failed' && (
@@ -299,6 +306,18 @@ export function App() {
               Skip step
             </button>
           </>
+        )}
+        {!running && run.status !== 'done' && run.resumeFrom != null && (
+          <button
+            className="primary"
+            onClick={() => {
+              void send<{ ok: boolean; error?: string }>({ kind: 'panel.resumeRun' }).then((res) =>
+                showError(res.error),
+              );
+            }}
+          >
+            Resume from step {run.resumeFrom + 1}
+          </button>
         )}
         {running && (
           <button className="ghost" onClick={() => void send({ kind: 'panel.cancelRun' })}>
@@ -438,8 +457,14 @@ export function App() {
                   steps={draftSteps}
                   onChange={setDraftSteps}
                   onSave={() => {
-                    void send({ kind: 'panel.updateWorkflowSteps', id: wf.id, steps: draftSteps });
-                    setEditingStepsId(null);
+                    void send<{ ok: boolean; error?: string }>({
+                      kind: 'panel.updateWorkflowSteps',
+                      id: wf.id,
+                      steps: draftSteps,
+                    }).then((res) => {
+                      if (res?.ok === false) showError(res.error);
+                      else setEditingStepsId(null);
+                    });
                   }}
                   onCancel={() => setEditingStepsId(null)}
                 />

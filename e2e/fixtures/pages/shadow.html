@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: shadow DOM</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Web components</h1>
+  <app-shell></app-shell>
+  <p id="result"></p>
+  <script>
+    // An app shell whose content lives in an open shadow root, with a nested
+    // component that has its own shadow root — like Salesforce, SAP UI5 or
+    // any Lit/Stencil app.
+    customElements.define('subscribe-form', class extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = `
+          <input id="email" type="email" placeholder="Work email">
+          <button id="go" type="button">Subscribe</button>`;
+        root.getElementById('go').addEventListener('click', () => {
+          document.getElementById('result').textContent =
+            'subscribed ' + root.getElementById('email').value;
+        });
+      }
+    });
+    customElements.define('app-shell', class extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = `
+          <section>
+            <h2>Newsletter</h2>
+            <subscribe-form></subscribe-form>
+          </section>`;
+      }
+    });
+  </script>
+</body>
+</html>

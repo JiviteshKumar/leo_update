@@ -1,5 +1,15 @@
 import type { TargetInfo } from './types';
 
+// Selector generation (record time) and resolution (replay time).
+//
+// Conventions shared by both sides:
+//  - `base:text=needle` — Playwright-style text pseudo: the visible element
+//    matching `base` whose text is `needle` (exact match preferred).
+//  - `host >>> inner` — pierces an open shadow root: `host` is resolved in
+//    the document, `inner` inside host.shadowRoot. Chains for nested roots.
+
+const SHADOW = ' >>> ';
+
 // Ids that look machine-generated (hashes, React ids, numeric suffixes from
 // list renderers) break on the next deploy, so they rank below stable hooks.
 const looksGenerated = (id: string): boolean =>
@@ -11,9 +21,16 @@ const looksGenerated = (id: string): boolean =>
 const cssEscape = (v: string): string => CSS.escape(v);
 const attrValue = (v: string): string => v.replace(/["\\]/g, '\\$&');
 
-const isUnique = (selector: string): boolean => {
+type Scope = Document | ShadowRoot;
+
+const scopeOf = (el: Element): Scope => {
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? root : document;
+};
+
+const isUniqueIn = (scope: Scope, selector: string): boolean => {
   try {
-    return document.querySelectorAll(selector).length === 1;
+    return scope.querySelectorAll(selector).length === 1;
   } catch {
     return false;
   }
@@ -27,21 +44,9 @@ const isStableClass = (c: string): boolean =>
   c.length >= 4 && c.length <= 30 && /^[a-z][a-z-]+$/i.test(c);
 
 // Attributes that identify an element the way a human would recognise it.
-// data-testid & friends first (test hooks), then a11y/name attributes; the
-// generic data-* sweep in generateSelectors covers app-specific ones.
-const ANCHOR_ATTRS = [
-  'data-testid',
-  'data-test',
-  'data-qa',
-  'data-cy',
-  'data-id',
-  'aria-label',
-  'name',
-];
+const ANCHOR_ATTRS = ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-id', 'aria-label', 'name'];
 
 // A selector that pins `el` on its own, if it carries a stable identifier.
-// Used both to emit a direct selector and to anchor positional paths so they
-// stop at the nearest recognisable ancestor instead of the document root.
 const stableAnchor = (el: Element): string | null => {
   const tag = el.tagName.toLowerCase();
   if (el.id && !looksGenerated(el.id)) return `#${cssEscape(el.id)}`;
@@ -51,6 +56,8 @@ const stableAnchor = (el: Element): string | null => {
   }
   return null;
 };
+
+const normalize = (s: string): string => s.replace(/\s+/g, ' ').trim();
 
 export const visibleText = (el: Element): string => {
   const html = el as HTMLElement;
@@ -62,7 +69,7 @@ export const visibleText = (el: Element): string => {
     el.getAttribute('alt')?.trim() ||
     (el as HTMLInputElement).value?.trim?.() ||
     '';
-  return text.replace(/\s+/g, ' ').slice(0, 60);
+  return normalize(text).slice(0, 60);
 };
 
 // Human-readable label for a form field: its <label>, aria-label,
@@ -71,15 +78,17 @@ export const fieldLabel = (el: Element): string => {
   const input = el as HTMLInputElement;
   if (input.labels?.length) {
     const t = input.labels[0].innerText?.trim();
-    if (t) return t.replace(/\s+/g, ' ').slice(0, 60);
+    if (t) return normalize(t).slice(0, 60);
   }
-  return (
+  const named =
     el.getAttribute('aria-label')?.trim() ||
     el.getAttribute('placeholder')?.trim() ||
-    el.getAttribute('name')?.trim() ||
-    visibleText(el) ||
-    el.tagName.toLowerCase()
-  );
+    el.getAttribute('data-placeholder')?.trim() ||
+    el.getAttribute('name')?.trim();
+  if (named) return named;
+  // A rich-text editor's text is what the user typed into it, not its name.
+  if ((el as HTMLElement).isContentEditable) return 'text editor';
+  return visibleText(el) || el.tagName.toLowerCase();
 };
 
 const nthOfTypePath = (el: Element, maxDepth = 10): string => {
@@ -99,12 +108,11 @@ const nthOfTypePath = (el: Element, maxDepth = 10): string => {
       }
     }
     if (!parent) {
+      // Top of the document or of a shadow tree.
       segments.unshift(tag);
       break;
     }
-    const siblings = Array.from(parent.children).filter(
-      (c) => c.tagName === node!.tagName,
-    );
+    const siblings = Array.from(parent.children).filter((c) => c.tagName === node!.tagName);
     const idx = siblings.indexOf(node) + 1;
     segments.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
     node = parent;
@@ -128,10 +136,9 @@ const anchoredDescendant = (el: Element, maxUp = 6): string | null => {
   return null;
 };
 
-// Ranked candidate selectors for an element. Unique matches at record time
-// rank first; the `:text=` pseudo (same convention the replayer resolves) is
-// the resilient fallback when attributes churn.
-export const generateSelectors = (el: Element): string[] => {
+// Ranked selectors for `el` within its own scope (document or shadow root).
+const localSelectors = (el: Element): string[] => {
+  const scope = scopeOf(el);
   const tag = el.tagName.toLowerCase();
   const raw: string[] = [];
 
@@ -153,28 +160,19 @@ export const generateSelectors = (el: Element): string[] => {
   // plus a11y/semantic attributes. These are how icons and other
   // attribute-poor controls are usually recognisable.
   for (const attr of el.getAttributeNames()) {
-    if (
-      attr.startsWith('data-') &&
-      !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(attr)
-    ) {
+    if (attr.startsWith('data-') && !['data-testid', 'data-test', 'data-qa', 'data-cy'].includes(attr)) {
       const v = el.getAttribute(attr);
-      if (v && v.length <= 40 && !looksGenerated(v)) {
-        raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
-      }
+      if (v && v.length <= 40 && !looksGenerated(v)) raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
     }
   }
   for (const attr of ['role', 'title', 'alt', 'type']) {
     const v = el.getAttribute(attr);
-    if (v && (attr !== 'type' || tag === 'input')) {
-      raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
-    }
+    if (v && (attr !== 'type' || tag === 'input')) raw.push(`${tag}[${attr}="${attrValue(v)}"]`);
   }
 
   // Stable class hooks, combined for specificity (svg.calendar-icon.large).
   const classes = Array.from(el.classList).filter(isStableClass).slice(0, 3);
-  if (classes.length) {
-    raw.push(`${tag}${classes.map((c) => `.${cssEscape(c)}`).join('')}`);
-  }
+  if (classes.length) raw.push(`${tag}${classes.map((c) => `.${cssEscape(c)}`).join('')}`);
 
   // Icon sprites: <svg> whose <use> points at a named symbol (#icon-calendar).
   if (tag === 'svg') {
@@ -187,18 +185,14 @@ export const generateSelectors = (el: Element): string[] => {
 
   if (tag === 'a') {
     const href = el.getAttribute('href');
-    if (href && href !== '#' && !href.startsWith('javascript:')) {
-      raw.push(`a[href="${attrValue(href)}"]`);
-    }
+    if (href && href !== '#' && !href.startsWith('javascript:')) raw.push(`a[href="${attrValue(href)}"]`);
   }
 
   const text = visibleText(el);
   if (text && ['a', 'button', 'label', 'span', 'div', 'li'].includes(tag)) {
     raw.push(`${tag}:text=${text.slice(0, 40)}`);
   }
-  if (el.getAttribute('role') === 'button' && text) {
-    raw.push(`[role="button"]:text=${text.slice(0, 40)}`);
-  }
+  if (el.getAttribute('role') === 'button' && text) raw.push(`[role="button"]:text=${text.slice(0, 40)}`);
 
   // Anchor a lenient and a precise path on the nearest identifiable ancestor,
   // then the whole-tree positional path as the last resort.
@@ -206,9 +200,25 @@ export const generateSelectors = (el: Element): string[] => {
   if (anchored) raw.push(anchored);
   raw.push(nthOfTypePath(el));
 
-  const unique = raw.filter((s) => !s.includes(':text=') && isUnique(s));
+  const unique = raw.filter((s) => !s.includes(':text=') && isUniqueIn(scope, s));
   const rest = raw.filter((s) => !unique.includes(s));
-  return [...new Set([...unique, ...rest])].slice(0, 10);
+  return [...new Set([...unique, ...rest])];
+};
+
+// Ranked candidate selectors for an element, up to 10. Elements inside open
+// shadow roots get `host >>> inner` chains.
+export const generateSelectors = (el: Element): string[] => {
+  const local = localSelectors(el);
+  const root = el.getRootNode();
+  if (!(root instanceof ShadowRoot)) return local.slice(0, 10);
+  // Resolve the host structurally (text selectors on a host would match its
+  // whole shadow content), then combine with the best inner selectors.
+  const hosts = generateSelectors(root.host)
+    .filter((s) => !s.split(SHADOW).pop()!.includes(':text='))
+    .slice(0, 2);
+  const out: string[] = [];
+  for (const inner of local.slice(0, 5)) for (const host of hosts) out.push(`${host}${SHADOW}${inner}`);
+  return out.slice(0, 10);
 };
 
 const frameParentPath = (): string[] => {
@@ -221,22 +231,31 @@ export const buildTarget = (el: Element, action: string): TargetInfo => {
   const text = visibleText(el);
   const label = fieldLabel(el);
 
+  const editable = (el as HTMLElement).isContentEditable;
+  const inputType = tag === 'input' ? (el as HTMLInputElement).type : '';
+
   let intent: string;
   if (action === 'type') intent = `Type into the "${label}" field`;
   else if (action === 'select') intent = `Choose an option in the "${label}" dropdown`;
+  else if (action === 'upload') intent = `Choose a file for the "${label}" field`;
+  // A checkbox's "text" is its value ("on"); name it by its label instead.
+  else if (inputType === 'checkbox') intent = `Toggle the "${label}" checkbox`;
+  else if (inputType === 'radio') intent = `Select the "${label}" option`;
+  else if (editable) intent = `Click into the "${label}"`;
   else intent = text ? `Click "${text}"` : `Click the ${tag} element`;
 
-  const context = el.parentElement
-    ? (el.parentElement as HTMLElement).innerText
-        ?.replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 200)
+  const parent = el.parentElement ?? ((el.getRootNode() as ShadowRoot).host as HTMLElement | undefined);
+  const context = parent
+    ? normalize((parent as HTMLElement).innerText ?? '').slice(0, 200)
     : undefined;
 
+  // Form fields change their text while being typed into (value), so only
+  // keep text for elements that are recognised by it.
+  const isField = ['input', 'textarea', 'select'].includes(tag) || editable;
   return {
     selectors: generateSelectors(el),
     tag,
-    text: text || undefined,
+    text: (isField ? el.getAttribute('placeholder') || el.getAttribute('aria-label') || '' : text) || undefined,
     intent,
     context: context || undefined,
     framePath: frameParentPath(),
@@ -247,40 +266,112 @@ export const buildTarget = (el: Element, action: string): TargetInfo => {
 // Resolution (replay side)
 // ---------------------------------------------------------------------------
 
-// Playwright-inspired `base:text=needle` pseudo. querySelector throws on
-// invalid CSS, so every attempt is wrapped; one bad selector never kills the
-// list. Adapted from clarity/extension steps/helpers.ts.
-export const trySelector = <T extends Element>(
-  selectors: string[],
-): T | null => {
-  for (const sel of selectors) {
-    try {
-      const textMatch = /^(.*?):text=(.+)$/.exec(sel);
-      if (textMatch) {
-        const [, base, needleRaw] = textMatch;
-        const needle = needleRaw.trim().toLowerCase();
-        const nodes = document.querySelectorAll<T>(base || '*');
-        for (const n of Array.from(nodes)) {
-          const text =
-            (n as unknown as HTMLElement).innerText?.toLowerCase() ?? '';
-          if (text.includes(needle) && isVisible(n)) return n;
-        }
-        continue;
-      }
-      const el = document.querySelector<T>(sel);
-      if (el && isVisible(el)) return el;
-    } catch {
-      // invalid CSS, skip
-    }
-  }
-  return null;
-};
-
 export const isVisible = (el: Element): boolean => {
   const html = el as HTMLElement;
   if (!html.getClientRects || html.getClientRects().length === 0) return false;
   const style = getComputedStyle(html);
   return style.visibility !== 'hidden' && style.display !== 'none';
+};
+
+// Every element matching `selector` in the document and in all open shadow
+// roots below it (the healer and agent must see web-component internals).
+export const deepQueryAll = (selector: string, scope: Scope = document): Element[] => {
+  const out: Element[] = [];
+  const walk = (s: Scope) => {
+    try {
+      out.push(...Array.from(s.querySelectorAll(selector)));
+    } catch {
+      return;
+    }
+    for (const el of Array.from(s.querySelectorAll('*'))) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(scope);
+  return out;
+};
+
+// Visible elements matching `base` whose text contains `needle`; an exact
+// match wins, otherwise the tightest (shortest-text) container — so
+// "Save" prefers a "Save" button over a "Save draft" button or a wrapper div.
+const byText = (scope: Scope, base: string, needleRaw: string): Element | null => {
+  const needle = normalize(needleRaw).toLowerCase();
+  let best: Element | null = null;
+  let bestLen = Infinity;
+  for (const n of Array.from(scope.querySelectorAll(base || '*'))) {
+    const text = normalize((n as HTMLElement).innerText ?? '').toLowerCase();
+    if (!text.includes(needle) || !isVisible(n)) continue;
+    if (text === needle) return n;
+    if (text.length < bestLen) {
+      best = n;
+      bestLen = text.length;
+    }
+  }
+  return best;
+};
+
+// Resolve one selector (with >>> and :text= support) to a visible element.
+export const resolveSelector = (selector: string): Element | null => {
+  const parts = selector.split(SHADOW);
+  let scope: Scope = document;
+  try {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const last = i === parts.length - 1;
+      const textMatch = /^(.*?):text=(.+)$/.exec(part);
+      let el: Element | null;
+      if (textMatch) el = byText(scope, textMatch[1], textMatch[2]);
+      else el = scope.querySelector(part);
+      if (!el) return null;
+      if (last) return isVisible(el) ? el : null;
+      if (!el.shadowRoot) return null;
+      scope = el.shadowRoot;
+    }
+  } catch {
+    // invalid CSS; skip
+  }
+  return null;
+};
+
+// Weak selectors (positional paths, loose descendant/class matches) can land
+// on a different element after a redesign. Those matches must still look
+// like the recorded element before replay acts on them.
+const isWeak = (selector: string): boolean => {
+  const last = selector.split(SHADOW).pop()!;
+  return (
+    last.includes(':nth-of-type') ||
+    / [a-z]/i.test(last.replace(/\[[^\]]*\]/g, '')) ||
+    /^[a-z]+(\.[\w-]+)+$/i.test(last)
+  );
+};
+
+export const plausibleMatch = (el: Element, target: TargetInfo): boolean => {
+  if (el.tagName.toLowerCase() !== target.tag) return false;
+  const isField = ['input', 'textarea', 'select'].includes(target.tag);
+  if (isField || !target.text) return true;
+  const now = normalize(visibleText(el)).toLowerCase();
+  const then = normalize(target.text).toLowerCase();
+  return now === then || now.includes(then) || (now.length > 0 && then.includes(now));
+};
+
+// Replay: the element a recorded target points at, or null.
+export const findTarget = (target: TargetInfo): Element | null => {
+  for (const sel of target.selectors) {
+    const el = resolveSelector(sel);
+    if (!el) continue;
+    if (isWeak(sel) && !plausibleMatch(el, target)) continue;
+    return el;
+  }
+  return null;
+};
+
+// Back-compat helper: first visible match among `selectors`.
+export const trySelector = <T extends Element>(selectors: string[]): T | null => {
+  for (const sel of selectors) {
+    const el = resolveSelector(sel);
+    if (el) return el as T;
+  }
+  return null;
 };
 
 export const matchesFrame = (framePath: string[]): boolean => {
@@ -289,4 +380,26 @@ export const matchesFrame = (framePath: string[]): boolean => {
   if (own.length === 0) return false;
   // Compare on origin + pathname so query params churn doesn't break frames.
   return own[own.length - 1] === framePath[framePath.length - 1];
+};
+
+// The innermost element at a viewport point, descending into open shadow
+// roots (document.elementFromPoint stops at the shadow host).
+export const deepElementFromPoint = (x: number, y: number): Element | null => {
+  let el = document.elementFromPoint(x, y);
+  while (el?.shadowRoot) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  return el;
+};
+
+// `ancestor` contains `node`, crossing shadow boundaries.
+export const composedContains = (ancestor: Element, node: Node | null): boolean => {
+  let n: Node | null = node;
+  while (n) {
+    if (n === ancestor) return true;
+    n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null);
+  }
+  return false;
 };

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: partner sign-in</title></head>
+<body style="font: 15px system-ui; margin: 24px">
+  <h1>Partner</h1>
+  <input id="user" type="text" placeholder="Username">
+  <button id="approve" type="button">Approve</button>
+  <script>
+    document.getElementById('approve').addEventListener('click', () => {
+      window.opener?.postMessage({ sso: document.getElementById('user').value }, '*');
+      setTimeout(() => window.close(), 150);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: tabs and popups</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Portal</h1>
+  <p><a id="open-tab" href="/tab-child.html" target="_blank">Open the report form in a new tab</a></p>
+  <p><button id="sso" type="button">Sign in with Partner</button></p>
+  <p id="result"></p>
+  <script>
+    // An OAuth-style popup: it reports back to the opener and closes itself.
+    document.getElementById('sso').addEventListener('click', () => {
+      window.open('/popup-auth.html', 'sso', 'width=480,height=400');
+    });
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.sso) document.getElementById('result').textContent = 'signed in as ' + e.data.sso;
+    });
+  </script>
+</body>
+</html>

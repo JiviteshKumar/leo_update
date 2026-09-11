@@ -2,8 +2,12 @@ import { chromium, expect, test as base, type BrowserContext, type Page, type Wo
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Workflow } from '@leo/shared';
+import { describeStep, type Workflow } from '@leo/shared';
 import { EXTENSION_DIR } from '../global-setup';
+
+// One line per step, for failure messages.
+export const describeSteps = (steps: Workflow['steps']): string =>
+  steps.map((s, i) => `  ${i}. [${s.type}] ${describeStep(s)}`).join('\n');
 
 export const SITE = 'http://127.0.0.1:4321';
 export const OTHER_SITE = 'http://localhost:4322';
@@ -36,6 +40,7 @@ type HookFn =
   | 'retryStep'
   | 'skipStep'
   | 'cancelRun'
+  | 'resumeRun'
   | 'runLog';
 
 export class Leo {
@@ -65,9 +70,14 @@ export class Leo {
 
   // Wait until the recording holds `min` steps (messages are async), then stop.
   async stop(name = 'Test workflow', min = 2): Promise<Workflow> {
-    await expect
-      .poll(async () => (await this.state()).rec?.steps.length ?? 0, { timeout: 10_000 })
-      .toBeGreaterThanOrEqual(min);
+    try {
+      await expect
+        .poll(async () => (await this.state()).rec?.steps.length ?? 0, { timeout: 10_000 })
+        .toBeGreaterThanOrEqual(min);
+    } catch {
+      const steps = (await this.state()).rec?.steps ?? [];
+      throw new Error(`expected at least ${min} recorded steps, got ${steps.length}:\n${describeSteps(steps)}`);
+    }
     await new Promise((r) => setTimeout(r, 300)); // let trailing events land
     const res = await this.call<{ ok: boolean; error?: string; id?: string }>('stopRecording', name);
     expect(res, res.error).toMatchObject({ ok: true });
@@ -119,8 +129,13 @@ export const mockAi = {
 export const test = base.extend<{ context: BrowserContext; leo: Leo }>({
   context: async ({}, use) => {
     const profile = mkdtempSync(join(tmpdir(), 'leo-e2e-'));
+    // LEO_E2E_CHROMIUM points at a specific Chromium build when Playwright's
+    // bundled one can't start on a machine (e.g. security software blocking
+    // its install folder). Branded Chrome/Edge can't be used: they ignore
+    // --load-extension.
+    const executablePath = process.env.LEO_E2E_CHROMIUM;
     const context = await chromium.launchPersistentContext(profile, {
-      channel: 'chromium',
+      ...(executablePath ? { executablePath } : { channel: 'chromium' }),
       headless: process.env.HEADED !== '1',
       viewport: { width: 1280, height: 800 },
       acceptDownloads: true,

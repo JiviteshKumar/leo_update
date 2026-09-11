@@ -1,27 +1,41 @@
+import { cursorHide } from '@/utils/cursor';
+import { installFrameOffsetResponder } from '@/utils/frames';
 import { attachRecorder } from '@/utils/recorder';
 import {
   agentAct,
+  agentLocate,
   agentSnapshot,
   execCandidate,
   execStep,
+  focusLocated,
+  hideLeoUiAt,
   highlightTarget,
+  locate,
+  locateCandidate,
+  selectAllLocated,
+  setLocatedValue,
+  settle,
+  verifyLocated,
 } from '@/utils/replayer';
-import { cursorHide } from '@/utils/cursor';
 import { matchesFrame } from '@/utils/selectors';
-import type { BgToContentMessage, ExecResult, Step } from '@/utils/types';
+import type { BgToContentMessage, Step } from '@/utils/types';
 
 // Runs on every page and frame. Two jobs:
 //  - Recording: attach DOM listeners when the background says this tab is
 //    being recorded (re-attaches automatically after each navigation).
-//  - Replay: execute steps the background sends, in the frame whose URL
-//    matches the step's framePath.
+//  - Replay: locate/act on elements the background asks about, in the frame
+//    whose URL matches the step's framePath.
 
 export default defineContentScript({
   matches: ['<all_urls>'],
   allFrames: true,
   runAt: 'document_start',
   main() {
+    const isTop = window.top === window;
     let detach: (() => void) | null = null;
+
+    // Lets child frames learn where they sit on the page (native clicks).
+    installFrameOffsetResponder();
 
     const startRecording = () => {
       if (detach) return;
@@ -31,11 +45,9 @@ export default defineContentScript({
         // uncaught "Extension context invalidated".
         try {
           if (!browser.runtime?.id) return;
-          void browser.runtime
-            .sendMessage({ kind: 'rec.step', step, replaceLastClicks })
-            .catch(() => {
-              // background gone or recording stopped mid-flight
-            });
+          void browser.runtime.sendMessage({ kind: 'rec.step', step, replaceLastClicks }).catch(() => {
+            // background gone or recording stopped mid-flight
+          });
         } catch {
           // context invalidated
         }
@@ -47,88 +59,108 @@ export default defineContentScript({
       detach = null;
     };
 
-    // On load, ask whether this tab is mid-recording (survives navigations).
+    // Ask whether this tab is mid-recording (survives navigations). Asked
+    // again as the page loads: a tab the recorded page just opened can reach
+    // document_start before the recording has switched over to it.
     const checkRecording = async () => {
+      if (detach) return;
       try {
-        const res = (await browser.runtime.sendMessage({
-          kind: 'rec.isRecording',
-        })) as { recording: boolean } | undefined;
+        const res = (await browser.runtime.sendMessage({ kind: 'rec.isRecording' })) as
+          | { recording: boolean }
+          | undefined;
         if (res?.recording) startRecording();
       } catch {
         // extension context not ready
       }
     };
     void checkRecording();
+    document.addEventListener('DOMContentLoaded', () => void checkRecording(), { once: true });
+    window.addEventListener('load', () => void checkRecording(), { once: true });
 
-    browser.runtime.onMessage.addListener(
-      (msg: BgToContentMessage, _sender, sendResponse) => {
-        switch (msg.kind) {
-          case 'rec.attach': {
-            startRecording();
-            sendResponse({ ok: true });
-            return false;
-          }
-          case 'rec.detach': {
-            stopRecording();
-            sendResponse({ ok: true });
-            return false;
-          }
-          case 'replay.ping': {
-            // Only the top frame answers, so the background gets one reply.
-            if (window.top !== window) return false;
-            sendResponse({ ok: true });
-            return false;
-          }
-          case 'replay.cursorHide': {
-            cursorHide();
-            return false;
-          }
-          case 'agent.snapshot': {
-            // Agent operates on the top frame only (v1).
-            if (window.top !== window) return false;
-            sendResponse(agentSnapshot());
-            return false;
-          }
-          case 'agent.act': {
-            if (window.top !== window) return false;
-            void agentAct(msg.action).then((result: ExecResult) =>
-              sendResponse(result),
-            );
-            return true;
-          }
-          case 'replay.exec': {
-            const target = 'target' in msg.step ? msg.step.target : undefined;
-            const framePath = target?.framePath ?? [];
-            if (!matchesFrame(framePath)) return false;
-            void execStep(msg.step, msg.fast === true).then((result: ExecResult) =>
-              sendResponse(result),
-            );
-            return true;
-          }
-          case 'replay.execCandidate': {
-            if (!matchesFrame(msg.step.target.framePath)) return false;
-            void execCandidate(msg.index, msg.step, msg.fast === true).then(
-              (result: ExecResult) => sendResponse(result),
-            );
-            return true;
-          }
-          case 'replay.highlight': {
-            if (!matchesFrame(msg.target.framePath)) return false;
-            void highlightTarget(msg.target).then((found) =>
-              sendResponse({ ok: found }),
-            );
-            return true;
-          }
-          default:
-            return false;
+    // Reply asynchronously with the promise's result.
+    const reply = <T>(p: Promise<T> | T, sendResponse: (r: T) => void): true => {
+      void Promise.resolve(p).then(sendResponse, (err: unknown) =>
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) } as T),
+      );
+      return true;
+    };
+
+    browser.runtime.onMessage.addListener((msg: BgToContentMessage, _sender, sendResponse) => {
+      switch (msg.kind) {
+        case 'rec.attach':
+          startRecording();
+          sendResponse({ ok: true });
+          return false;
+        case 'rec.detach':
+          stopRecording();
+          sendResponse({ ok: true });
+          return false;
+
+        // Top frame only: one answer per tab.
+        case 'replay.ping':
+          if (!isTop) return false;
+          sendResponse({ ok: true });
+          return false;
+        case 'replay.cursorHide':
+          cursorHide();
+          return false;
+        case 'replay.settle':
+          if (!isTop) return false;
+          return reply(settle(msg.quietMs, msg.maxMs), sendResponse);
+        case 'ui.clearPoint':
+          if (!isTop) return false;
+          sendResponse({ ok: true, hidden: hideLeoUiAt(msg.x, msg.y) });
+          return false;
+        case 'agent.snapshot':
+          if (!isTop) return false;
+          sendResponse(agentSnapshot());
+          return false;
+        case 'agent.locate':
+          if (!isTop) return false;
+          return reply(agentLocate(msg.action), sendResponse);
+        case 'agent.act':
+          if (!isTop) return false;
+          return reply(agentAct(msg.action), sendResponse);
+
+        // Frame-targeted: only the frame the element lives in answers.
+        case 'replay.locate':
+          if (!matchesFrame(msg.target.framePath)) return false;
+          return reply(locate(msg.target, msg.fast === true, msg.timeoutMs), sendResponse);
+        case 'replay.locateCandidate':
+          if (!matchesFrame(msg.framePath)) return false;
+          return reply(locateCandidate(msg.index, msg.fast === true), sendResponse);
+        case 'replay.selectAll':
+          if (!matchesFrame(msg.framePath)) return false;
+          sendResponse(selectAllLocated());
+          return false;
+        case 'replay.focus':
+          if (!matchesFrame(msg.framePath)) return false;
+          sendResponse(focusLocated());
+          return false;
+        case 'replay.verify':
+          if (!matchesFrame(msg.framePath)) return false;
+          sendResponse(verifyLocated(msg.value));
+          return false;
+        case 'replay.setValue':
+          if (!matchesFrame(msg.framePath)) return false;
+          return reply(setLocatedValue(msg.value), sendResponse);
+        case 'replay.exec': {
+          const framePath = ('target' in msg.step ? msg.step.target?.framePath : undefined) ?? [];
+          if (!matchesFrame(framePath)) return false;
+          return reply(execStep(msg.step, msg.fast === true), sendResponse);
         }
-      },
-    );
-
-    // Recording state can end while a page is open; background broadcasts
-    // stop via a detach message. Also flush pending typing before unload.
-    window.addEventListener('pagehide', () => {
-      // attachRecorder's own pagehide handler flushes; nothing extra here.
+        case 'replay.execCandidate':
+          if (!matchesFrame(msg.step.target.framePath)) return false;
+          return reply(execCandidate(msg.index, msg.step, msg.fast === true), sendResponse);
+        case 'replay.highlight':
+          if (!matchesFrame(msg.target.framePath)) return false;
+          return reply(
+            highlightTarget(msg.target).then((found) => ({ ok: found })),
+            sendResponse,
+          );
+        default:
+          return false;
+      }
     });
   },
 });

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: new tab</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Report form</h1>
+  <input id="title" type="text" placeholder="Report title">
+  <button id="file" type="button">File report</button>
+  <p id="result"></p>
+  <script>
+    document.getElementById('file').addEventListener('click', () => {
+      document.getElementById('result').textContent = 'filed ' + document.getElementById('title').value;
+    });
+  </script>
+</body>
+</html>

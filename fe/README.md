@@ -14,8 +14,17 @@ server actions.
    (type: Web application) with authorized redirect URI
    `http://localhost:3010/api/auth/callback/google`, then fill in
    `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env.local`.
-3. **Create tables** — `bun run db:push`
-4. **Run** — `bun dev`, then open http://localhost:3010.
+3. **Auth secret** — set `BETTER_AUTH_SECRET` (a long random string) and
+   `BETTER_AUTH_URL`.
+4. **AI** — set `ANTHROPIC_API_KEY`. It stays on the server: the extension
+   calls `/api/ai/heal`, `/api/ai/objective` and `/api/ai/agent` with the
+   user's session cookie, rate-limited per user (in memory — use a shared
+   store before running more than one instance). `LEO_AI_MODEL` overrides
+   the model (default `claude-sonnet-5`).
+5. **Create tables** — `bun run db:push`
+6. **Run** — `bun dev`, then open http://localhost:3010.
+
+See `.env.example` for every variable.
 
 ## Layout
 

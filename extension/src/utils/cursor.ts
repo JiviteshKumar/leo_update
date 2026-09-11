@@ -9,6 +9,10 @@
 import { DEFAULT_CURSOR_COLOR } from './types';
 
 const CURSOR_ID = 'leo-ghost-cursor';
+
+// Marks nodes Leo adds to the page (cursor, pulse rings, styles) so page
+// observers in Leo — like "wait until the page is quiet" — can ignore them.
+export const LEO_NODE_ATTR = 'data-leo';
 const SETTINGS_KEY = 'leo:settings';
 
 let color = DEFAULT_CURSOR_COLOR;
@@ -46,6 +50,7 @@ const ensure = (): HTMLElement => {
   if (cursor) return cursor;
   cursor = document.createElement('div');
   cursor.id = CURSOR_ID;
+  cursor.setAttribute(LEO_NODE_ATTR, '');
   cursor.style.cssText = [
     'position: fixed',
     'left: 0',
@@ -82,6 +87,7 @@ export const cursorMoveTo = async (x: number, y: number): Promise<void> => {
 
 export const cursorPulse = (x: number, y: number): void => {
   const ring = document.createElement('div');
+  ring.setAttribute(LEO_NODE_ATTR, '');
   ring.style.cssText = [
     'position: fixed',
     `left: ${Math.round(x - 20)}px`,
@@ -130,6 +136,7 @@ const injectKeyframes = (): void => {
   if (keyframesInjected) return;
   keyframesInjected = true;
   const style = document.createElement('style');
+  style.setAttribute(LEO_NODE_ATTR, '');
   style.textContent =
     '@keyframes leo-pulse { from { transform: scale(0.45); opacity: 1; } to { transform: scale(1.7); opacity: 0; } }';
   document.documentElement.appendChild(style);

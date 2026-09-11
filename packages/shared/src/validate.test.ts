@@ -58,6 +58,17 @@ describe('validateWorkflow', () => {
     expect(r.ok && r.value[0].type === 'click' && r.value[0].target.framePath).toEqual([]);
   });
 
+  test('accepts upload and tab steps', () => {
+    const r = validateSteps([
+      { type: 'upload', target },
+      { type: 'switch-tab', urlHint: 'https://x.test/popup' },
+      { type: 'switch-tab' },
+      { type: 'close-tab' },
+    ]);
+    expect(r.ok && r.value.map((s) => s.type)).toEqual(['upload', 'switch-tab', 'switch-tab', 'close-tab']);
+    expect(r.ok && r.value[2]).toEqual({ type: 'switch-tab', urlHint: '' });
+  });
+
   test('keeps key modifiers and drops false ones', () => {
     const r = validateSteps([{ type: 'key', key: 'k', mods: { ctrl: true, shift: false } }]);
     expect(r.ok && r.value[0]).toEqual({ type: 'key', key: 'k', mods: { ctrl: true } });

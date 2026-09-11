@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: trusted input only</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Anti-bot checkout</h1>
+  <p>Like many real sites, this page ignores events that aren't from a real
+  mouse or keyboard (<code>event.isTrusted === false</code>).</p>
+  <label>Coupon <input id="coupon" type="text"></label>
+  <button id="apply" type="button">Apply</button>
+  <form action="/nav2.html" method="get" style="margin-top: 16px">
+    <label>Search <input id="q" name="q" type="text"></label>
+    <!-- No submit button: only a real Enter key submits this form. -->
+  </form>
+  <p id="result"></p>
+  <script>
+    let typedTrusted = true;
+    document.getElementById('coupon').addEventListener('input', (e) => {
+      if (!e.isTrusted) typedTrusted = false;
+    });
+    document.getElementById('apply').addEventListener('click', (e) => {
+      if (!e.isTrusted) return; // bots get nothing
+      const v = document.getElementById('coupon').value;
+      document.getElementById('result').textContent =
+        `applied ${v} (typing ${typedTrusted ? 'trusted' : 'untrusted'})`;
+    });
+  </script>
+</body>
+</html>

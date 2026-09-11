@@ -22,6 +22,12 @@ export const describeStep = (step: Step): string => {
       return `Press ${keyCombo(step.key, step.mods)}`;
     case 'download':
       return 'Wait for the file download';
+    case 'upload':
+      return `${step.target.intent} (you choose the file at run time)`;
+    case 'switch-tab':
+      return 'Continue in the new tab';
+    case 'close-tab':
+      return 'Return to the previous tab';
     case 'agent':
       return `AI: ${step.goal}`;
   }

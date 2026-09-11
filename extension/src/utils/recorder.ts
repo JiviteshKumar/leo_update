@@ -18,9 +18,16 @@ const CLICKABLE =
   'a, button, input, select, textarea, label, [role="button"], [role="link"], ' +
   '[role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [onclick]';
 
-// True when an event came from Leo's own floating menu. Events crossing the
-// shadow boundary retarget to the <leo-ui> host, so `ev.target` alone catches
-// it; composedPath() is scanned too in case the target isn't yet retargeted.
+// The element the user actually interacted with. Events from inside an open
+// shadow root are retargeted to its host by the time they reach `window`;
+// composedPath()[0] is the real target.
+const realTarget = (ev: Event): Element | null => {
+  const first = ev.composedPath?.()[0];
+  if (first instanceof Element) return first;
+  return ev.target instanceof Element ? ev.target : null;
+};
+
+// True when an event came from Leo's own floating menu.
 const isLeoEvent = (ev: Event): boolean => {
   const isHost = (n: EventTarget | null): boolean =>
     n instanceof Element && n.tagName.toLowerCase() === LEO_UI_HOST;
@@ -38,36 +45,69 @@ const isTextEntry = (el: Element): boolean => {
   return !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color'].includes(type);
 };
 
+const isFileInput = (el: Element): boolean =>
+  el.tagName.toLowerCase() === 'input' && (el as HTMLInputElement).type === 'file';
+
+// For contenteditable, the editing host (the element with contenteditable),
+// not whichever inner <p>/<span> the caret sits in.
+const editingHost = (el: Element): Element => {
+  if (!(el as HTMLElement).isContentEditable) return el;
+  let host: Element = el;
+  while (host.parentElement && (host.parentElement as HTMLElement).isContentEditable) {
+    host = host.parentElement;
+  }
+  return host;
+};
+
 export const attachRecorder = (emit: EmitFn): (() => void) => {
   let pending: PendingType | null = null;
   let lastClickEl: Element | null = null;
   let lastClickAt = 0;
+  // When the last recorded Enter key happened. Enter in a form makes the
+  // browser click its submit button, and Enter on a button activates it;
+  // either way it fires a click with no mouse behind it (detail === 0) that
+  // is a consequence of the key step, not an action of its own.
+  let lastEnterAt = 0;
 
   const flush = () => {
     if (!pending) return;
     const step = pending.step;
     pending = null;
-    // An empty non-secret type step means the user cleared a field; still
-    // worth replaying. A totally untouched pending should not happen since
-    // pendings are only created on input events.
     emit(step);
   };
 
   const onClick = (ev: MouseEvent) => {
     if (!ev.isTrusted || isLeoEvent(ev)) return;
-    const raw = ev.target as Element | null;
-    if (!raw || !(raw instanceof Element)) return;
+    // A keyboard-generated click right after a recorded Enter: replaying
+    // the Enter reproduces it, so recording it too would act twice.
+    if (ev.detail === 0 && Date.now() - lastEnterAt < 1_000) return;
+    const raw = realTarget(ev);
+    if (!raw) return;
     const el = (raw.closest?.(CLICKABLE) as Element | null) ?? raw;
 
-    // Clicks on native <select> elements are noise: the popup cannot be
-    // opened by a synthetic click at replay time, and the meaningful action
+    // Clicks on native <select> elements are noise: the meaningful action
     // (the chosen option) arrives as a change event and becomes a `select`
-    // step. Recording the click would just replay a no-op.
-    const selTag = el.tagName.toLowerCase();
-    if (selTag === 'select' || selTag === 'option') return;
+    // step.
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'select' || tag === 'option') return;
+    // A file input's click only opens the OS file chooser; the chosen file
+    // arrives as a change event and becomes an `upload` step.
+    if (isFileInput(el)) return;
+
+    // Clicking a <label> makes the browser click its control too. That
+    // second click is a consequence, not a user action: replaying both
+    // would toggle a checkbox twice.
+    if (
+      lastClickEl instanceof HTMLLabelElement &&
+      lastClickEl.control === el &&
+      Date.now() - lastClickAt < 500
+    ) {
+      return;
+    }
 
     // Clicking the field being typed into is just refocusing; skip it.
-    if (pending && (el === pending.el || raw === pending.el)) return;
+    const host = editingHost(el);
+    if (pending && (host === pending.el || raw === pending.el)) return;
     flush();
 
     emit({ type: 'click', target: buildTarget(el, 'click') });
@@ -77,41 +117,37 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
 
   const onDblClick = (ev: MouseEvent) => {
     if (!ev.isTrusted || isLeoEvent(ev)) return;
-    const raw = ev.target as Element | null;
-    if (!raw || !(raw instanceof Element)) return;
+    const raw = realTarget(ev);
+    if (!raw) return;
     const el = (raw.closest?.(CLICKABLE) as Element | null) ?? raw;
     // The two clicks of the double-click were already recorded; replace them.
     const replace = el === lastClickEl && Date.now() - lastClickAt < 700 ? 2 : 0;
     emit({ type: 'dblclick', target: buildTarget(el, 'click') }, replace);
   };
 
-  const onInput = (ev: Event) => {
+  const captureValue = (ev: Event) => {
     if (!ev.isTrusted || isLeoEvent(ev)) return;
-    const el = ev.target as Element | null;
-    if (!el || !(el instanceof Element) || !isTextEntry(el)) return;
+    const raw = realTarget(ev);
+    if (!raw || !isTextEntry(raw)) return;
+    const el = editingHost(raw);
 
     const input = el as HTMLInputElement;
     const secret = input.type === 'password';
-    const value = (el as HTMLElement).isContentEditable
-      ? ((el as HTMLElement).textContent ?? '')
-      : (input.value ?? '');
+    const value = (el as HTMLElement).isContentEditable ? (el.textContent ?? '') : (input.value ?? '');
 
     if (pending && pending.el !== el) flush();
     if (!pending) {
       pending = {
         el,
-        step: {
-          type: 'type',
-          target: buildTarget(el, 'type'),
-          text: '',
-          secret,
-        },
+        step: { type: 'type', target: buildTarget(el, 'type'), text: '', secret },
       };
       if (secret) {
         pending.step.target.intent = `Type the password into the "${fieldLabel(el)}" field`;
       }
     }
     // Passwords are never stored, not even transiently in the step object.
+    // During IME composition (CJK input) the value holds the in-progress
+    // text; compositionend delivers the committed value.
     pending.step.text = secret ? '' : value;
   };
 
@@ -120,12 +156,12 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
   let lastSelect: { el: Element; value: string } | null = null;
   const onSelectPick = (ev: Event) => {
     if (!ev.isTrusted || isLeoEvent(ev)) return;
-    const el = ev.target as Element | null;
-    if (!el || !(el instanceof Element)) return;
-    if (el.tagName.toLowerCase() !== 'select') return;
+    const el = realTarget(ev);
+    if (!el || el.tagName.toLowerCase() !== 'select') return;
     const select = el as HTMLSelectElement;
     if (lastSelect && lastSelect.el === el && lastSelect.value === select.value) return;
     lastSelect = { el, value: select.value };
+    flush();
     emit({
       type: 'select',
       target: buildTarget(el, 'select'),
@@ -133,17 +169,28 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
       label: select.selectedOptions[0]?.label ?? select.value,
     });
   };
-  const onChange = onSelectPick;
+
+  const onChange = (ev: Event) => {
+    if (!ev.isTrusted || isLeoEvent(ev)) return;
+    const el = realTarget(ev);
+    if (el && isFileInput(el)) {
+      if (!(el as HTMLInputElement).files?.length) return; // chooser cancelled
+      flush();
+      emit({ type: 'upload', target: buildTarget(el, 'upload') });
+      return;
+    }
+    onSelectPick(ev);
+  };
 
   const onKeyDown = (ev: KeyboardEvent) => {
     if (!ev.isTrusted || isLeoEvent(ev)) return;
-    // A modifier held on its own carries no action.
-    if (ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Alt' || ev.key === 'Shift') {
-      return;
-    }
+    // A modifier held on its own carries no action; keys during IME
+    // composition belong to the composition.
+    if (ev.key === 'Control' || ev.key === 'Meta' || ev.key === 'Alt' || ev.key === 'Shift') return;
+    if (ev.isComposing || ev.key === 'Process') return;
 
     const cmdMod = ev.ctrlKey || ev.metaKey || ev.altKey;
-    const active = document.activeElement;
+    const active = realTarget(ev) ?? document.activeElement;
     const inField = active ? isTextEntry(active) || active.tagName === 'SELECT' : false;
     const onControl = Boolean(active?.closest?.(CLICKABLE));
 
@@ -152,64 +199,60 @@ export const attachRecorder = (emit: EmitFn): (() => void) => {
       // Tab/Escape outside a field is browser chrome noise, not workflow.
       record = ev.key === 'Enter' || inField;
     } else if (cmdMod) {
-      // A keyboard shortcut (Ctrl/Cmd/Alt + key). Clipboard/undo/select-all
-      // combos inside a text field are already reflected in the captured
-      // field value or are no-ops on replay, so skip them.
+      // Clipboard/undo/select-all combos inside a text field are already
+      // reflected in the captured field value, so skip them.
       const editCombo =
         inField && !ev.altKey && ['a', 'c', 'v', 'x', 'z', 'y'].includes(ev.key.toLowerCase());
       record = !editCombo;
-    } else if (
-      ev.key === 'ArrowUp' ||
-      ev.key === 'ArrowDown' ||
-      ev.key === 'ArrowLeft' ||
-      ev.key === 'ArrowRight'
-    ) {
+    } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown' || ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
       // Arrow navigation matters for comboboxes/autocompletes/menus; a plain
-      // arrow outside any control is just caret movement.
-      record = inField || onControl;
+      // arrow outside any control is just caret movement. On a native
+      // <select> the resulting choice is recorded as a `select` step, so the
+      // arrows themselves are noise.
+      record = active?.tagName !== 'SELECT' && (inField || onControl);
     }
     if (!record) return;
 
     flush();
+    if (ev.key === 'Enter') lastEnterAt = Date.now();
     const mods: KeyMods = {};
     if (ev.ctrlKey) mods.ctrl = true;
     if (ev.metaKey) mods.meta = true;
     if (ev.altKey) mods.alt = true;
     if (ev.shiftKey) mods.shift = true;
+    const targetEl = active ? editingHost(active) : null;
     emit({
       type: 'key',
       key: ev.key,
       ...(Object.keys(mods).length ? { mods } : {}),
-      target: active && (inField || onControl) ? buildTarget(active, 'click') : undefined,
+      target: targetEl && (inField || onControl) ? buildTarget(targetEl, 'click') : undefined,
     });
   };
 
   const onBlur = (ev: FocusEvent) => {
     if (isLeoEvent(ev)) return;
-    if (pending && ev.target === pending.el) flush();
+    const el = realTarget(ev);
+    if (pending && el && editingHost(el) === pending.el) flush();
   };
 
   // The page is going away (navigation); get the pending type out now.
   const onPageHide = () => flush();
 
-  window.addEventListener('click', onClick, true);
-  window.addEventListener('dblclick', onDblClick, true);
-  window.addEventListener('input', onInput, true);
-  window.addEventListener('input', onSelectPick, true);
-  window.addEventListener('change', onChange, true);
-  window.addEventListener('keydown', onKeyDown, true);
-  window.addEventListener('blur', onBlur, true);
-  window.addEventListener('pagehide', onPageHide, true);
+  const listeners: [string, EventListener][] = [
+    ['click', onClick as EventListener],
+    ['dblclick', onDblClick as EventListener],
+    ['input', captureValue],
+    ['compositionend', captureValue],
+    ['input', onSelectPick],
+    ['change', onChange],
+    ['keydown', onKeyDown as EventListener],
+    ['blur', onBlur as EventListener],
+    ['pagehide', onPageHide],
+  ];
+  for (const [type, fn] of listeners) window.addEventListener(type, fn, true);
 
   return () => {
     flush();
-    window.removeEventListener('click', onClick, true);
-    window.removeEventListener('dblclick', onDblClick, true);
-    window.removeEventListener('input', onInput, true);
-    window.removeEventListener('input', onSelectPick, true);
-    window.removeEventListener('change', onChange, true);
-    window.removeEventListener('keydown', onKeyDown, true);
-    window.removeEventListener('blur', onBlur, true);
-    window.removeEventListener('pagehide', onPageHide, true);
+    for (const [type, fn] of listeners) window.removeEventListener(type, fn, true);
   };
 };

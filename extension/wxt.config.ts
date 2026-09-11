@@ -17,7 +17,9 @@ export default defineConfig({
     description:
       'Teach your browser a task once. Leo replays it for you, and AI keeps it working when websites change.',
     version: '0.2.0',
-    permissions: ['storage', 'tabs', 'scripting', 'downloads', 'webNavigation'],
+    // `debugger` gives replay real (trusted) mouse/keyboard input — see
+    // src/utils/cdp.ts.
+    permissions: ['storage', 'tabs', 'scripting', 'downloads', 'webNavigation', 'debugger'],
     // Leo automates arbitrary third-party sites the user records on, so it
     // needs to run its recorder/replayer content script everywhere.
     host_permissions: ['<all_urls>'],

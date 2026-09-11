@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Leo fixture: widgets</title>
+  <style>
+    body { font: 15px system-ui; margin: 40px; }
+    .dropdown { position: relative; display: inline-block; }
+    .dropdown-menu { display: none; position: absolute; top: 100%; left: 0; background: #fff;
+                     border: 1px solid #999; list-style: none; margin: 0; padding: 0; }
+    .dropdown.open .dropdown-menu { display: block; }
+    .dropdown-menu li { padding: 6px 12px; cursor: pointer; }
+    #editor { border: 1px solid #999; min-height: 40px; padding: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Widgets</h1>
+
+  <p><label id="terms-label"><input id="terms" type="checkbox"> I agree to the terms</label></p>
+
+  <div class="dropdown" id="plan">
+    <button class="dropdown-toggle" type="button">Choose a plan</button>
+    <ul class="dropdown-menu" role="listbox">
+      <li role="option" data-value="free">Free</li>
+      <li role="option" data-value="team">Team</li>
+      <li role="option" data-value="business">Business</li>
+    </ul>
+  </div>
+
+  <p><label>Name (any script) <input id="name" type="text"></label></p>
+
+  <div id="editor" contenteditable="true"></div>
+
+  <p><label>Attachment <input id="file" type="file"></label></p>
+
+  <p><a id="download" href="/files/report.txt">Download report</a></p>
+
+  <button id="done" type="button">Done</button>
+  <pre id="result"></pre>
+
+  <script>
+    let plan = '';
+    const dd = document.getElementById('plan');
+    dd.querySelector('.dropdown-toggle').addEventListener('click', () => dd.classList.toggle('open'));
+    dd.querySelectorAll('li').forEach((li) =>
+      li.addEventListener('click', () => {
+        plan = li.dataset.value;
+        dd.querySelector('.dropdown-toggle').textContent = li.textContent;
+        dd.classList.remove('open');
+      }),
+    );
+    document.getElementById('done').addEventListener('click', () => {
+      document.getElementById('result').textContent = JSON.stringify({
+        terms: document.getElementById('terms').checked,
+        plan,
+        name: document.getElementById('name').value,
+        editor: document.getElementById('editor').textContent,
+        file: document.getElementById('file').files[0]?.name ?? '',
+      });
+    });
+  </script>
+</body>
+</html>

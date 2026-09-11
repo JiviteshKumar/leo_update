@@ -19,7 +19,10 @@ import type {
 
 export interface RecState {
   active: boolean;
+  // The tab being recorded. Follows the user into tabs the page opens.
   tabId: number;
+  // Tabs that opened the current one (a new tab pushes, closing it pops).
+  tabStack: number[];
   startedAt: number;
   steps: Step[];
   // Timestamp of the last click/key step; used to classify navigations.
@@ -35,18 +38,51 @@ export type RunStatus =
   | 'error'
   | 'cancelled';
 
+export interface RunLogEntry {
+  index: number;
+  type: Step['type'];
+  outcome: 'ok' | 'healed' | 'skipped' | 'failed';
+  ms: number;
+  error?: string;
+}
+
 export interface RunState {
   workflowId: string;
   workflowName: string;
+  // The tab the run is acting in right now.
   tabId: number;
+  // Tabs the run came from (a new tab pushes, returning pops).
+  tabStack: number[];
   stepIndex: number;
   totalSteps: number;
   status: RunStatus;
   error?: string;
+  // What a 'waiting-user' pause is waiting for.
+  waitingFor?: 'password' | 'file';
   // Step indexes the AI healer repaired during this run.
   healedSteps: number[];
   // Live activity of a running `agent` step, shown in the run card.
   agentNote?: string;
+  // 'native': trusted input through the debugger (the default).
+  // 'compatible': page-level events, used when the debugger can't attach or
+  // the user dismissed Chrome's debugging bar.
+  inputMode: 'native' | 'compatible';
+  startedAt: number;
+  log: RunLogEntry[];
+  // Set when a run stopped early; the panel offers to resume from here.
+  resumeFrom?: number;
+}
+
+// A finished run, kept (last 20) for troubleshooting.
+export interface RunRecord {
+  workflowId: string;
+  workflowName: string;
+  startedAt: number;
+  finishedAt: number;
+  status: RunStatus;
+  error?: string;
+  inputMode: RunState['inputMode'];
+  steps: RunLogEntry[];
 }
 
 // Replay pacing. 'verbose' mirrors a human user (cursor glide, per-key
@@ -92,6 +128,8 @@ export type PanelMessage =
   | { kind: 'panel.skipStep' }
   // Re-run the step that just failed.
   | { kind: 'panel.retryStep' }
+  // Continue a stopped run from the step it stopped at, in the same tab.
+  | { kind: 'panel.resumeRun' }
   | { kind: 'panel.getSettings' }
   | { kind: 'panel.setSettings'; settings: Settings }
   | { kind: 'panel.getAccount'; refresh?: boolean }
@@ -106,18 +144,37 @@ export type ContentMessage =
   | { kind: 'rec.step'; step: Step; replaceLastClicks?: number }
   | { kind: 'rec.isRecording' };
 
+// Messages carrying a target or framePath are handled only by the frame the
+// element lives in; everything else is handled by the top frame.
 export type BgToContentMessage =
   | { kind: 'replay.ping' }
+  // Native input: find the element, wait until it can receive a click, and
+  // report its center in top-level viewport coordinates for the debugger.
+  | { kind: 'replay.locate'; target: TargetInfo; fast?: boolean; timeoutMs?: number }
+  | { kind: 'replay.locateCandidate'; index: number; framePath: string[]; fast?: boolean }
+  // Follow-ups on the element the last locate returned in that frame.
+  | { kind: 'replay.selectAll'; framePath: string[] }
+  | { kind: 'replay.focus'; framePath: string[] }
+  | { kind: 'replay.verify'; framePath: string[]; value: string }
+  | { kind: 'replay.setValue'; framePath: string[]; value: string }
+  // Compatible input: the content script finds and acts on the element with
+  // page-level events. Also used for native <select>.
   | { kind: 'replay.exec'; step: ElementStep | KeyStep; fast?: boolean }
   | { kind: 'replay.execCandidate'; index: number; step: ElementStep; fast?: boolean }
   | { kind: 'replay.highlight'; target: TargetInfo }
+  // Resolves once the page stops changing (or maxMs passes).
+  | { kind: 'replay.settle'; quietMs: number; maxMs: number }
   | { kind: 'replay.cursorHide' }
-  // Agent step: snapshot the page, or act on a candidate by index. Handled by
-  // the top frame only.
+  // Agent step (top frame): snapshot the page; locate an action's element
+  // for native input; or perform the action with page-level events.
   | { kind: 'agent.snapshot' }
+  | { kind: 'agent.locate'; action: AgentAction }
   | { kind: 'agent.act'; action: AgentAction }
   | { kind: 'rec.attach' }
   | { kind: 'rec.detach' }
+  // Hide Leo's floating menu for a moment if it covers this point, so a
+  // replayed click lands on the page underneath.
+  | { kind: 'ui.clearPoint'; x: number; y: number }
   // Presence check for the floating-menu content script. Visibility itself is
   // driven by a storage.local flag watched via storage.onChanged, not by
   // messages — this only lets the background detect a tab that has no menu
@@ -126,6 +183,11 @@ export type BgToContentMessage =
 
 export type ExecResult =
   | { ok: true; healedSelectors?: string[] }
+  | { ok: false; notFound: true; candidates: Candidate[]; pageTitle: string; pageUrl: string }
+  | { ok: false; notFound?: false; error: string };
+
+export type LocateResult =
+  | { ok: true; x: number; y: number; healedSelectors?: string[] }
   | { ok: false; notFound: true; candidates: Candidate[]; pageTitle: string; pageUrl: string }
   | { ok: false; notFound?: false; error: string };
 

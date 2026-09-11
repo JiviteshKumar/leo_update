@@ -11,7 +11,12 @@ test('form: text, select, checkbox, password, submit', async ({ context, leo }) 
 
   await page.fill('#name', 'Ada Lovelace');
   await page.fill('#email', 'ada@example.com');
-  await page.selectOption('#country', 'de');
+  // Pick with the keyboard like a person: Playwright's selectOption() fires
+  // synthetic events, which the recorder (rightly) ignores.
+  await page.focus('#country');
+  await page.keyboard.press('ArrowDown'); // India
+  await page.keyboard.press('ArrowDown'); // Germany
+  await expect(page.locator('#country')).toHaveValue('de');
   await page.check('#terms');
   await page.fill('#password', 'hunter22');
   await page.click('#submit');
@@ -102,13 +107,15 @@ test('self-healing: a redesigned page is repaired once, then replays without AI'
   wf.steps[0] = { type: 'navigate', url: redesigned };
   await leo.call('saveWorkflow', wf);
 
-  await mockAi.queue({ heal: [{ pickText: 'Your name' }, { pickText: 'Send form' }] });
+  // The name field kept its placeholder, so a recorded selector still finds
+  // it without AI; only the button (new id, new label) needs repair.
+  await mockAi.queue({ heal: [{ pickText: 'Send form' }] });
   const run = await leo.run(wf.id);
   const result = await leo.expectDone();
-  expect(result.healedSteps).toEqual([1, 2]);
+  expect(result.healedSteps).toEqual([2]);
   await expect(run.locator('#result')).toContainText('"name":"Grace Hopper"');
   const heals = (await mockAi.log()).filter((e) => e.path === '/api/ai/heal');
-  expect(heals).toHaveLength(2);
+  expect(heals).toHaveLength(1);
 
   // Second run: the repaired selectors are saved, so no AI is needed.
   await run.close();
@@ -116,7 +123,7 @@ test('self-healing: a redesigned page is repaired once, then replays without AI'
   const second = await leo.expectDone();
   expect(second.healedSteps).toEqual([]);
   await expect(again.locator('#result')).toContainText('"name":"Grace Hopper"');
-  expect((await mockAi.log()).filter((e) => e.path === '/api/ai/heal')).toHaveLength(2);
+  expect((await mockAi.log()).filter((e) => e.path === '/api/ai/heal')).toHaveLength(1);
 });
 
 test('self-healing: a low-confidence guess is not clicked; the vision agent decides', async ({ context, leo }) => {
@@ -132,7 +139,7 @@ test('self-healing: a low-confidence guess is not clicked; the vision agent deci
   await leo.call('saveWorkflow', wf);
 
   await mockAi.queue({
-    heal: [{ pickText: 'Your name' }, { pickText: 'Send form', confidence: 'low' }],
+    heal: [{ pickText: 'Send form', confidence: 'low' }],
     agent: [
       { tools: [{ name: 'click', input: { pickText: 'Send form' } }] },
       { tools: [{ name: 'finish', input: { success: true, note: 'submitted' } }] },

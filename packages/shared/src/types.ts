@@ -42,6 +42,15 @@ export type Step =
   | { type: 'key'; key: string; mods?: KeyMods; target?: TargetInfo }
   // A file download happened here. Replay waits for it to complete.
   | { type: 'download' }
+  // A file was chosen in a file input. Files are never stored; replay pauses
+  // so the user picks the file, like a secret field.
+  | { type: 'upload'; target: TargetInfo }
+  // The previous step opened a new tab (target=_blank link, window.open);
+  // the workflow continues in that tab.
+  | { type: 'switch-tab'; urlHint: string }
+  // The current tab closed (e.g. a sign-in popup finishing); the workflow
+  // continues in the tab that opened it.
+  | { type: 'close-tab' }
   // A natural-language goal achieved by the AI agent at run time. For dynamic
   // actions that can't be a fixed click — "select last month", "pick the first
   // available slot". Authored by the user, not recorded.
