@@ -1,176 +1,86 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { ANTHROPIC_API_KEY } from './env';
+import type Anthropic from '@anthropic-ai/sdk';
+import { FE_URL } from './env';
 import type {
   AgentAction,
   AgentSnapshot,
-  Candidate,
+  AiErrorBody,
+  AiErrorCode,
+  HealRequest,
+  HealVerdict,
+  ObjectiveResponse,
+  PerformedAction,
   Step,
-  TargetInfo,
 } from './types';
-import { DEFAULT_MODEL } from './types';
 
-// AI self-healing: when every recorded selector fails, ask Claude to match
-// the step's intent against the live page's interactive elements. Structured
-// outputs guarantee a parseable verdict. Runs in the extension service
-// worker with the build-time API key (env.ts), hence dangerouslyAllowBrowser.
+// Client side of Leo's AI features. The model, prompts and API key live in
+// the web app (fe/src/lib/ai); the extension only sends the live-page data
+// and, for the agent, drives the observe → act loop against the real tab.
+// Every call is authenticated by the user's Leo session cookie.
 
-export interface HealVerdict {
-  match: number | null;
-  confidence: 'high' | 'medium' | 'low';
-  reason: string;
+export type AiFailure = AiErrorCode | 'network' | 'cancelled';
+
+export class AiError extends Error {
+  constructor(
+    message: string,
+    readonly code: AiFailure,
+  ) {
+    super(message);
+    this.name = 'AiError';
+  }
 }
 
-const VERDICT_SCHEMA = {
-  type: 'object' as const,
-  properties: {
-    match: {
-      type: ['integer', 'null'],
-      description:
-        'Index of the candidate element that is the same control the user originally interacted with, or null if none matches.',
-    },
-    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-    reason: { type: 'string', description: 'One short sentence.' },
-  },
-  required: ['match', 'confidence', 'reason'],
-  additionalProperties: false,
-};
-
-const SYSTEM_PROMPT =
-  'You repair broken browser automations. A recorded workflow step can no ' +
-  'longer find its target element because the website changed. You are given ' +
-  'the original step (intent, element tag, visible text, old selectors, ' +
-  'nearby text) and a numbered list of interactive elements currently ' +
-  'visible on the page. Pick the candidate that is the SAME control the ' +
-  'user originally interacted with. Match on purpose and meaning, not on ' +
-  'exact attribute equality. If no candidate plausibly serves the same ' +
-  'purpose, return null rather than guessing.';
-
-export const healStep = async (
-  step: { intent: string; target: TargetInfo },
-  candidates: Candidate[],
-  page: { title: string; url: string },
-  objective?: string,
-): Promise<HealVerdict> => {
-  const client = new Anthropic({
-    apiKey: ANTHROPIC_API_KEY,
-    dangerouslyAllowBrowser: true,
-  });
-
-  const candidateLines = candidates
-    .map((c) => {
-      const attrs = Object.entries(c.attrs)
-        .map(([k, v]) => `${k}="${v}"`)
-        .join(' ');
-      return `[${c.index}] <${c.tag}${attrs ? ' ' + attrs : ''}> ${c.text || '(no text)'}`;
-    })
-    .join('\n');
-
-  const user = [
-    objective ? `Workflow goal: ${objective}` : '',
-    `Page: ${page.title} (${page.url})`,
-    '',
-    'Original step:',
-    `- Intent: ${step.intent}`,
-    `- Element: <${step.target.tag}> ${step.target.text ?? ''}`,
-    `- Old selectors (all failed): ${step.target.selectors.join(' | ')}`,
-    step.target.context ? `- Text near the element when recorded: ${step.target.context}` : '',
-    '',
-    'Interactive elements on the page right now:',
-    candidateLines || '(none found)',
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  const response = await client.messages.create({
-    model: DEFAULT_MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    output_config: {
-      format: {
-        type: 'json_schema',
-        schema: VERDICT_SCHEMA,
-      },
-    },
-    messages: [{ role: 'user', content: user }],
-  });
-
-  if (response.stop_reason === 'refusal') {
-    return { match: null, confidence: 'low', reason: 'model declined the request' };
-  }
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '';
-  const verdict = JSON.parse(text) as HealVerdict;
-  if (verdict.match != null && (verdict.match < 0 || verdict.match >= candidates.length)) {
-    return { match: null, confidence: 'low', reason: 'model returned an invalid index' };
-  }
-  return verdict;
-};
-
-// ---------------------------------------------------------------------------
-// Objective derivation: one cheap call at record time that turns the step
-// list into a name + one-line goal, later fed to the healer/agent as context.
-// ---------------------------------------------------------------------------
-
-const OBJECTIVE_SCHEMA = {
-  type: 'object' as const,
-  properties: {
-    name: { type: 'string', description: 'A short imperative title, at most 6 words.' },
-    objective: {
-      type: 'string',
-      description: 'One sentence: what the whole workflow accomplishes for the user.',
-    },
-  },
-  required: ['name', 'objective'],
-  additionalProperties: false,
-};
-
-const describeStep = (step: Step): string => {
-  switch (step.type) {
-    case 'navigate':
-      return `Go to ${step.url}`;
-    case 'nav-wait':
-      return 'Wait for the page to load';
-    case 'click':
-      return step.target.intent;
-    case 'dblclick':
-      return `Double ${step.target.intent.toLowerCase()}`;
-    case 'type':
-      return step.secret
-        ? `Type a secret value into "${step.target.intent}"`
-        : `${step.target.intent}: "${step.text.slice(0, 40)}"`;
-    case 'select':
-      return `${step.target.intent}: ${step.label}`;
-    case 'key':
-      return `Press ${step.key}`;
-    case 'download':
-      return 'Wait for a file download';
-    case 'agent':
-      return `AI: ${step.goal}`;
-  }
-};
-
-export const deriveObjective = async (
-  steps: Step[],
-): Promise<{ name: string; objective: string } | null> => {
-  if (!ANTHROPIC_API_KEY) return null;
-  const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY, dangerouslyAllowBrowser: true });
-  const lines = steps.map((s, i) => `${i + 1}. ${describeStep(s)}`).join('\n');
+const post = async <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> => {
+  let res: Response;
   try {
-    const response = await client.messages.create({
-      model: DEFAULT_MODEL,
-      max_tokens: 300,
-      system:
-        'You summarize a recorded browser automation. Given its ordered steps, ' +
-        'return a short imperative name and a one-sentence objective describing ' +
-        'what the whole workflow accomplishes for the user. Be concrete; name the ' +
-        'site or task when it is clear from the steps.',
-      output_config: { format: { type: 'json_schema', schema: OBJECTIVE_SCHEMA } },
-      messages: [{ role: 'user', content: `Steps:\n${lines}` }],
+    res = await fetch(`${FE_URL}${path}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
     });
-    if (response.stop_reason === 'refusal') return null;
-    const text = response.content.find((b) => b.type === 'text')?.text ?? '';
-    const parsed = JSON.parse(text) as { name?: string; objective?: string };
-    if (!parsed.objective) return null;
-    return { name: (parsed.name ?? '').trim(), objective: parsed.objective.trim() };
+  } catch {
+    if (signal?.aborted) throw new AiError('Cancelled.', 'cancelled');
+    throw new AiError(`Could not reach Leo Cloud (${FE_URL}).`, 'network');
+  }
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as AiErrorBody | null;
+    throw new AiError(err?.error ?? `Leo Cloud returned HTTP ${res.status}.`, err?.code ?? 'provider_error');
+  }
+  return (await res.json()) as T;
+};
+
+// One sentence the run card can show for any AI failure.
+export const describeAiError = (err: unknown): string => {
+  if (err instanceof AiError) {
+    switch (err.code) {
+      case 'unauthorized':
+        return 'Sign in to Leo to use AI repair and AI steps.';
+      case 'rate_limited':
+      case 'provider_rate_limited':
+        return 'AI is busy right now (rate limit). Retry in a minute.';
+      case 'not_configured':
+        return 'AI is not configured on the Leo server (ANTHROPIC_API_KEY is missing).';
+      case 'network':
+        return err.message;
+      default:
+        return `AI error: ${err.message}`;
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
+};
+
+// ---------------------------------------------------------------------------
+// Healer + objective
+// ---------------------------------------------------------------------------
+
+export const healStep = (req: HealRequest): Promise<HealVerdict> =>
+  post<HealVerdict>('/api/ai/heal', req);
+
+// Best-effort: a missing objective only means less context for later repairs.
+export const deriveObjective = async (steps: Step[]): Promise<ObjectiveResponse | null> => {
+  try {
+    return await post<ObjectiveResponse>('/api/ai/objective', { steps });
   } catch {
     return null;
   }
@@ -184,84 +94,10 @@ export const deriveObjective = async (
 
 const AGENT_MAX_STEPS = 16;
 
-const AGENT_SYSTEM =
-  'You drive a web page to accomplish a goal on the user\'s behalf. Each turn ' +
-  'you see a screenshot of the page plus a numbered list of the interactive ' +
-  'elements on it, with their bounding boxes as "@ (x,y wxh)" in screenshot ' +
-  'pixels — use the boxes to match list entries to what you see. Prefer ' +
-  'acting on elements by [index] with click/type/press_key. If the control ' +
-  'you can see has no matching list entry, use click_at(x, y) with the ' +
-  'coordinates of its center in the screenshot. Use scroll(dy) if the target ' +
-  'is off-screen. After every action you get a fresh screenshot and list — ' +
-  're-read them, since indexes change. Orient yourself from what is visible ' +
-  '(e.g. the month shown in a date picker) and compute relative goals from ' +
-  'the given current date. Take the smallest number of steps. Call ' +
-  'finish(success=true) the moment the goal is met, or finish(success=false, ' +
-  'note) if it is impossible.';
-
-const AGENT_TOOLS = [
-  {
-    name: 'click',
-    description: 'Click the interactive element at the given index.',
-    input_schema: {
-      type: 'object' as const,
-      properties: { index: { type: 'integer' } },
-      required: ['index'],
-    },
-  },
-  {
-    name: 'type',
-    description: 'Focus the element at index and type the given text into it.',
-    input_schema: {
-      type: 'object' as const,
-      properties: { index: { type: 'integer' }, text: { type: 'string' } },
-      required: ['index', 'text'],
-    },
-  },
-  {
-    name: 'press_key',
-    description:
-      'Press a single key (Enter, Escape, Tab, ArrowUp/Down/Left/Right) on the element at index.',
-    input_schema: {
-      type: 'object' as const,
-      properties: { index: { type: 'integer' }, key: { type: 'string' } },
-      required: ['index', 'key'],
-    },
-  },
-  {
-    name: 'click_at',
-    description:
-      'Click at a screenshot coordinate. Use ONLY when no listed element ' +
-      'matches the control you can see; prefer click(index) otherwise.',
-    input_schema: {
-      type: 'object' as const,
-      properties: { x: { type: 'integer' }, y: { type: 'integer' } },
-      required: ['x', 'y'],
-    },
-  },
-  {
-    name: 'scroll',
-    description:
-      'Scroll the page vertically by dy pixels (positive = down, negative = up).',
-    input_schema: {
-      type: 'object' as const,
-      properties: { dy: { type: 'integer' } },
-      required: ['dy'],
-    },
-  },
-  {
-    name: 'finish',
-    description: 'End the task. Set success=true only if the goal was achieved.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        success: { type: 'boolean' },
-        note: { type: 'string', description: 'One short sentence.' },
-      },
-      required: ['success', 'note'],
-    },
-  },
-];
+interface AgentTurnResponse {
+  content: Anthropic.ContentBlock[];
+  stop_reason: Anthropic.StopReason | null;
+}
 
 const renderSnapshot = (s: AgentSnapshot, resultNote?: string): string => {
   const lines = s.candidates.map((c) => {
@@ -329,43 +165,11 @@ const observationContent = (
 ): (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] => {
   const blocks: (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] = [];
   if (image) {
-    blocks.push({
-      type: 'image',
-      source: { type: 'base64', media_type: 'image/jpeg', data: image },
-    });
+    blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image } });
   }
   blocks.push({ type: 'text', text: renderSnapshot(snap, resultNote) });
   return blocks;
 };
-
-// Prompt caching: the whole conversation (system + tools + every prior turn's
-// screenshots and snapshots) is re-sent each turn. A single ephemeral cache
-// breakpoint on the last block of the last message lets the API serve that
-// growing prefix from cache (~0.1x input price) instead of full price — which
-// is the dominant cost of the agent loop. Moving the marker doesn't change the
-// cached content, so it never invalidates. Called before every request.
-const CACHE_CONTROL = { type: 'ephemeral' as const };
-const moveCacheBreakpoint = (messages: Anthropic.MessageParam[]): void => {
-  for (const m of messages) {
-    if (!Array.isArray(m.content)) continue;
-    for (const b of m.content) {
-      if (b && typeof b === 'object') delete (b as { cache_control?: unknown }).cache_control;
-    }
-  }
-  const last = messages[messages.length - 1];
-  if (last && Array.isArray(last.content) && last.content.length > 0) {
-    const block = last.content[last.content.length - 1] as { cache_control?: unknown };
-    if (block && typeof block === 'object') block.cache_control = CACHE_CONTROL;
-  }
-};
-
-// A successfully executed agent action, with fresh selectors for the element
-// it touched (when it touched one) so recovered workflow steps can be
-// repaired in storage.
-export interface PerformedAction {
-  action: AgentAction;
-  healedSelectors?: string[];
-}
 
 export interface AgentRunResult {
   success: boolean;
@@ -373,23 +177,31 @@ export interface AgentRunResult {
   performed: PerformedAction[];
 }
 
+export interface AgentIO {
+  observe: () => Promise<AgentSnapshot>;
+  act: (action: AgentAction) => Promise<{ ok: boolean; error?: string; healedSelectors?: string[] }>;
+  // Returns a base64 JPEG of the run tab, downscaled so 1 image px == 1 CSS
+  // px (candidate rects and click_at coordinates line up with the image), or
+  // null when capture fails — the loop then runs text-only for that turn.
+  capture: (dpr: number) => Promise<string | null>;
+  onProgress?: (note: string) => void;
+  // Aborts the in-flight model call and stops the loop (End run).
+  signal?: AbortSignal;
+}
+
 export const runAgentStep = async (
   goal: string,
   now: Date,
-  observe: () => Promise<AgentSnapshot>,
-  act: (action: AgentAction) => Promise<{ ok: boolean; error?: string; healedSelectors?: string[] }>,
-  // Returns a base64 JPEG of the tab, downscaled so 1 image px == 1 CSS px
-  // (candidate rects and click_at coordinates line up with the image), or
-  // null when capture fails — the loop then runs text-only for that turn.
-  capture: (dpr: number) => Promise<string | null>,
-  onProgress?: (note: string) => void,
+  io: AgentIO,
   objective?: string,
 ): Promise<AgentRunResult> => {
-  const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY, dangerouslyAllowBrowser: true });
   const performed: PerformedAction[] = [];
+  const checkCancelled = () => {
+    if (io.signal?.aborted) throw new AiError('Cancelled.', 'cancelled');
+  };
 
-  const first = await observe();
-  const firstShot = await capture(first.viewport.dpr);
+  const first = await io.observe();
+  const firstShot = await io.capture(first.viewport.dpr);
   const messages: Anthropic.MessageParam[] = [
     {
       role: 'user',
@@ -407,14 +219,8 @@ export const runAgentStep = async (
   ];
 
   for (let i = 0; i < AGENT_MAX_STEPS; i++) {
-    moveCacheBreakpoint(messages);
-    const resp = await client.messages.create({
-      model: DEFAULT_MODEL,
-      max_tokens: 1024,
-      system: AGENT_SYSTEM,
-      tools: AGENT_TOOLS,
-      messages,
-    });
+    checkCancelled();
+    const resp = await post<AgentTurnResponse>('/api/ai/agent', { messages }, io.signal);
     if (resp.stop_reason === 'refusal') {
       return { success: false, note: 'the model declined the request', performed };
     }
@@ -427,78 +233,36 @@ export const runAgentStep = async (
       return { success: false, note: 'the agent stopped without finishing', performed };
     }
 
+    // Every tool_use must get a tool_result in the next user turn, so the
+    // loop answers all of them even when one fails.
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const tu of toolUses) {
       if (tu.name === 'finish') {
         const input = tu.input as { success?: boolean; note?: string };
-        onProgress?.(input.note ?? '');
+        io.onProgress?.(input.note ?? '');
         return { success: Boolean(input.success), note: input.note ?? '', performed };
       }
+      checkCancelled();
       const action = toAction(tu.name, (tu.input ?? {}) as Record<string, unknown>);
       let note: string;
       if (!action) {
         note = `unknown or malformed tool call: ${tu.name}`;
       } else {
-        onProgress?.(actionLabel(action));
-        const r = await act(action);
+        io.onProgress?.(actionLabel(action));
+        const r = await io.act(action);
         note = r.ok ? 'done' : `failed: ${r.error ?? 'error'}`;
         if (r.ok) performed.push({ action, healedSelectors: r.healedSelectors });
       }
-      const snap = await observe();
-      const shot = await capture(snap.viewport.dpr);
+      const snap = await io.observe();
+      const shot = await io.capture(snap.viewport.dpr);
       toolResults.push({
         type: 'tool_result',
         tool_use_id: tu.id,
         content: observationContent(snap, shot, note),
+        ...(action && note !== 'done' ? { is_error: true } : {}),
       });
     }
     messages.push({ role: 'user', content: toolResults });
   }
   return { success: false, note: `did not finish within ${AGENT_MAX_STEPS} steps`, performed };
-};
-
-// Goal text for vision-agent recovery of one failed recorded step. Kept pure
-// so it can be tested; the background wires it to runAgentStep.
-export const recoveryGoal = (step: {
-  type: string;
-  target: TargetInfo;
-  text?: string;
-  secret?: boolean;
-}): string =>
-  `Complete this single action from a recorded browser workflow, then finish: ` +
-  `${step.target.intent}.` +
-  (step.target.text ? ` The original element's text was "${step.target.text}".` : '') +
-  (step.target.context
-    ? ` Text near it when recorded: "${step.target.context.slice(0, 150)}".`
-    : '') +
-  (step.type === 'type' && !step.secret && step.text ? ` Text to type: "${step.text}".` : '');
-
-// Selectors to repair a recovered step with, or null when repair would be
-// unsafe. Only a recovery that took exactly ONE element action is
-// unambiguous: that element must be the control the step pointed at. A
-// multi-action recovery (open dropdown → click option) can't be captured in
-// one step's selectors — patching the last element would make the next run
-// skip the earlier actions and break again. Scrolls don't touch elements and
-// are ignored.
-export const selectorsFromRecovery = (performed: PerformedAction[]): string[] | null => {
-  const elementActions = performed.filter((p) => p.action.kind !== 'scroll');
-  if (elementActions.length !== 1) return null;
-  const sels = elementActions[0].healedSelectors;
-  return sels && sels.length ? sels : null;
-};
-
-export const describeAiError = (err: unknown): string => {
-  if (err instanceof Anthropic.AuthenticationError) {
-    return 'Anthropic API key was rejected. Check WXT_ANTHROPIC_API_KEY in extension/.env and rebuild.';
-  }
-  if (err instanceof Anthropic.RateLimitError) {
-    return 'Anthropic API rate limit hit. Try again in a minute.';
-  }
-  if (err instanceof Anthropic.APIConnectionError) {
-    return 'Could not reach the Anthropic API.';
-  }
-  if (err instanceof Anthropic.APIError) {
-    return `Anthropic API error: ${err.message}`;
-  }
-  return err instanceof Error ? err.message : String(err);
 };

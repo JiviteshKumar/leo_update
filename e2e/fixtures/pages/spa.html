@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: single-page app</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <nav>
+    <a href="/spa.html" data-route="/">Home</a> ·
+    <a href="/spa.html#/orders" data-route="/orders">Orders</a>
+  </nav>
+  <main id="view"></main>
+  <script>
+    // Client-side router. Route changes never load a new document, and each
+    // view renders after a delay, like data fetched from an API.
+    const view = document.getElementById('view');
+    const render = () => {
+      const route = location.hash.replace('#', '') || '/';
+      view.innerHTML = '<p>Loading…</p>';
+      setTimeout(() => {
+        if (route === '/orders') {
+          view.innerHTML =
+            '<h1>Orders</h1><ul>' +
+            ['A-100', 'A-101', 'A-102']
+              .map((id) => `<li><button class="order" data-order="${id}">Open ${id}</button></li>`)
+              .join('') +
+            '</ul><p id="opened"></p>';
+          view.querySelectorAll('.order').forEach((b) =>
+            b.addEventListener('click', () => {
+              document.getElementById('opened').textContent = 'opened ' + b.dataset.order;
+            }),
+          );
+        } else {
+          view.innerHTML = '<h1>Home</h1><p>Welcome.</p>';
+        }
+      }, 700);
+    };
+    document.querySelectorAll('a[data-route]').forEach((a) =>
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        history.pushState({}, '', a.dataset.route === '/' ? '/spa.html' : '/spa.html#' + a.dataset.route);
+        render();
+      }),
+    );
+    window.addEventListener('popstate', render);
+    render();
+  </script>
+</body>
+</html>

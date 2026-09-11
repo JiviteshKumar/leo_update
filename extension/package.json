@@ -2,7 +2,7 @@
   "name": "leo",
   "description": "Teach your browser a task once. Leo records the workflow and replays it, with AI keeping it working when websites change.",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",
@@ -12,14 +12,16 @@
     "postinstall": "wxt prepare"
   },
   "dependencies": {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "@leo/shared": "workspace:*",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@anthropic-ai/sdk": "^0.125.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
     "@wxt-dev/module-react": "^1.1.3",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "wxt": "^0.20.27"
   }
 }

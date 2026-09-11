@@ -1,0 +1,20 @@
+{
+  "name": "leo-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "extension",
+    "fe",
+    "e2e"
+  ],
+  "scripts": {
+    "dev:fe": "bun run --cwd fe dev",
+    "dev:ext": "bun run --cwd extension dev",
+    "build": "bun run --cwd extension build && bun run --cwd fe build",
+    "typecheck": "bun run --cwd packages/shared typecheck && bun run --cwd extension compile && bun run --cwd fe typecheck",
+    "lint": "bun run --cwd fe lint",
+    "test": "bun test packages fe/src",
+    "e2e": "bun run --cwd e2e test",
+    "check": "bun run typecheck && bun run lint && bun run test"
+  }
+}

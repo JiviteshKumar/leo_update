@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: page 2</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Page two</h1>
+  <p id="query"></p>
+  <button id="confirm" type="button">Confirm</button>
+  <p id="status"></p>
+  <script>
+    document.getElementById('query').textContent =
+      'q=' + (new URLSearchParams(location.search).get('q') || '');
+    document.getElementById('confirm').addEventListener('click', () => {
+      document.getElementById('status').textContent = 'confirmed';
+    });
+  </script>
+</body>
+</html>

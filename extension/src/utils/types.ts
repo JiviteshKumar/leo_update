@@ -1,72 +1,17 @@
-// ---------------------------------------------------------------------------
-// Workflow model
-// ---------------------------------------------------------------------------
+// The workflow model and AI wire shapes live in @leo/shared so the extension
+// and the web app can never drift apart. Re-exported here so extension code
+// keeps a single import path.
+export * from '@leo/shared';
 
-// Everything Leo knows about an element at record time. `selectors` is a
-// ranked candidate list tried in order at replay; `intent` + `context` are
-// the semantic grounding the AI healer uses when every selector has broken.
-export interface TargetInfo {
-  selectors: string[];
-  tag: string;
-  text?: string;
-  intent: string;
-  context?: string;
-  // [] = top frame; otherwise the URL (origin + path) of the iframe the
-  // element lives in. Replay broadcasts to all frames and only the matching
-  // frame executes.
-  framePath: string[];
-}
-
-// Held modifiers for a key press. Absent flags are false.
-export interface KeyMods {
-  ctrl?: boolean;
-  meta?: boolean;
-  alt?: boolean;
-  shift?: boolean;
-}
-
-export type Step =
-  // Explicit navigation (typed URL, reload). Replay drives tabs.update.
-  | { type: 'navigate'; url: string }
-  // Navigation caused by the previous click/key. Replay just waits for it.
-  | { type: 'nav-wait'; urlHint: string }
-  | { type: 'click'; target: TargetInfo }
-  | { type: 'dblclick'; target: TargetInfo }
-  // `secret` steps never store the text; replay pauses for the user.
-  | { type: 'type'; target: TargetInfo; text: string; secret: boolean }
-  | { type: 'select'; target: TargetInfo; value: string; label: string }
-  // A discrete key press: named non-printable keys (Enter, Tab, Escape,
-  // Arrow*, …) and keyboard shortcuts (`mods` holds ctrl/meta/alt/shift).
-  // Plain printable typing is captured as `type` steps, not here.
-  | { type: 'key'; key: string; mods?: KeyMods; target?: TargetInfo }
-  // A file download happened here. Replay waits for it to complete.
-  | { type: 'download' }
-  // A natural-language goal achieved by the AI agent at run time. For dynamic
-  // actions that can't be a fixed click — "select last month", "pick the first
-  // available slot". Authored by the user, not recorded.
-  | { type: 'agent'; goal: string };
-
-export type ElementStep = Extract<
+import type {
+  AgentAction,
+  Candidate,
+  ElementStep,
+  KeyStep,
   Step,
-  { type: 'click' | 'dblclick' | 'type' | 'select' }
->;
-
-export type KeyStep = Extract<Step, { type: 'key' }>;
-
-export interface Workflow {
-  id: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
-  startUrl: string;
-  steps: Step[];
-  // How many times the AI healer has repaired this workflow.
-  healCount: number;
-  // One-line description of what the workflow accomplishes, derived by AI at
-  // record time. Fed to the healer/agent as global context so a broken or
-  // dynamic step is resolved with knowledge of the overall goal.
-  objective?: string;
-}
+  TargetInfo,
+  Workflow,
+} from '@leo/shared';
 
 // ---------------------------------------------------------------------------
 // Recording / run state
@@ -108,8 +53,6 @@ export interface RunState {
 // typing, pauses between steps); 'agent' does everything as fast as possible.
 export type RunSpeed = 'verbose' | 'agent';
 
-// The Anthropic API key is not a setting: it's baked in at build time from
-// extension/.env (see src/utils/env.ts).
 export interface Settings {
   cursorColor: string;
   speed: RunSpeed;
@@ -122,9 +65,6 @@ export interface Account {
   image?: string | null;
 }
 
-// The single model Leo uses for every AI call (selector healer, vision agent,
-// objective derivation). Set here in code — not user-configurable.
-export const DEFAULT_MODEL = 'claude-sonnet-5';
 export const DEFAULT_CURSOR_COLOR = '#4c8bf5';
 export const DEFAULT_SPEED: RunSpeed = 'verbose';
 
@@ -132,48 +72,6 @@ export const DEFAULT_SPEED: RunSpeed = 'verbose';
 // originate inside the shadow root retarget to this host when observed at
 // `window`, so the recorder ignores anything whose target is this tag.
 export const LEO_UI_HOST = 'leo-ui';
-
-// ---------------------------------------------------------------------------
-// AI healing
-// ---------------------------------------------------------------------------
-
-// Compact description of a live interactive element, sent to the AI healer
-// when the recorded selectors no longer match anything.
-export interface Candidate {
-  index: number;
-  tag: string;
-  text: string;
-  attrs: Record<string, string>;
-  // Viewport-relative bounding box in CSS px. Filled by agentSnapshot() so
-  // the vision agent can correlate candidates with the screenshot; the
-  // text-only healer path leaves it unset.
-  rect?: { x: number; y: number; w: number; h: number };
-}
-
-// ---------------------------------------------------------------------------
-// AI agent (dynamic `agent` steps + failed-step recovery)
-// ---------------------------------------------------------------------------
-
-// What the agent observes each turn: the numbered interactive elements it can
-// act on (by index), plus page text for context (dates, month labels, …).
-export interface AgentSnapshot {
-  candidates: Candidate[];
-  pageText: string;
-  title: string;
-  url: string;
-  // Screenshots are downscaled to CSS-px size, so candidate rects and
-  // click_at coordinates line up 1:1 with image pixels.
-  viewport: { w: number; h: number; dpr: number };
-}
-
-// An action the agent takes: on a candidate by its snapshot index, at a
-// screenshot coordinate (elements the DOM sweep missed), or a page scroll.
-export type AgentAction =
-  | { kind: 'click'; index: number }
-  | { kind: 'type'; index: number; text: string }
-  | { kind: 'key'; index: number; key: string }
-  | { kind: 'clickAt'; x: number; y: number }
-  | { kind: 'scroll'; dy: number };
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -197,7 +95,7 @@ export type PanelMessage =
   | { kind: 'panel.getSettings' }
   | { kind: 'panel.setSettings'; settings: Settings }
   | { kind: 'panel.getAccount'; refresh?: boolean }
-  // Opens the fe app in a tab so the user can sign in with Google there.
+  // Opens the fe app in a tab so the user can sign in there.
   | { kind: 'panel.signIn' }
   | { kind: 'panel.signOut' }
   // Replace a saved workflow's steps (the step editor: delete steps, insert

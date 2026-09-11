@@ -1,15 +1,14 @@
 import {
+  AiError,
   deriveObjective,
   describeAiError,
   healStep,
-  recoveryGoal,
   runAgentStep,
-  selectorsFromRecovery,
   type AgentRunResult,
 } from '@/utils/ai';
-import { ANTHROPIC_API_KEY } from '@/utils/env';
+import { recoveryGoal, selectorsFromRecovery } from '@leo/shared';
+import { FE_URL } from '@/utils/env';
 import {
-  FE_URL,
   deleteWorkflowRemote,
   fetchAccount,
   pullWorkflows,
@@ -56,6 +55,8 @@ export default defineBackground(() => {
   // drives the browser, so the keepalive interval below keeps the SW alive.
   let run: RunState | null = null;
   let cancelRequested = false;
+  // Aborts in-flight AI calls when the run is cancelled.
+  let runAbort: AbortController | null = null;
   let continueResolver: ((ok: boolean) => void) | null = null;
   // Resolves the step-failed pause with the user's choice.
   let failureResolver: ((choice: 'retry' | 'skip' | 'end') => void) | null = null;
@@ -150,13 +151,18 @@ export default defineBackground(() => {
           run.status === 'step-failed'),
     );
 
-  const startRecording = async (): Promise<{ ok: boolean; error?: string }> => {
+  // Records `tabId` — the tab whose floating menu was used — falling back to
+  // the active tab of the focused window.
+  const startRecording = async (tabId?: number): Promise<{ ok: boolean; error?: string }> => {
     if (runActive()) return { ok: false, error: 'A run is in progress.' };
     // A finished run is only kept so the panel can show its result; a new
     // recording supersedes it.
     run = null;
     if (await getRec()) return { ok: false, error: 'Already recording.' };
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    const tab =
+      tabId != null
+        ? await browser.tabs.get(tabId).catch(() => undefined)
+        : (await browser.tabs.query({ active: true, lastFocusedWindow: true }))[0];
     if (!tab?.id || !tab.url || !/^https?:/.test(tab.url)) {
       return { ok: false, error: 'Open a normal website tab first, then start recording.' };
     }
@@ -206,7 +212,9 @@ export default defineBackground(() => {
     broadcast();
   };
 
-  const stopRecording = async (name: string): Promise<{ ok: boolean; error?: string }> => {
+  const stopRecording = async (
+    name: string,
+  ): Promise<{ ok: boolean; error?: string; id?: string }> => {
     const rec = await getRec();
     if (!rec) return { ok: false, error: 'Not recording.' };
     await setRec(null);
@@ -236,7 +244,7 @@ export default defineBackground(() => {
     // it grounds the healer/agent later. Non-blocking: the save above already
     // succeeded, so we patch the workflow when (if) the summary returns.
     void deriveObjectiveFor(workflow.id, rec.steps, Boolean(name.trim()));
-    return { ok: true };
+    return { ok: true, id: workflow.id };
   };
 
   // Fire-and-forget objective derivation; patches the saved workflow in place.
@@ -245,7 +253,6 @@ export default defineBackground(() => {
     steps: Step[],
     userNamed: boolean,
   ): Promise<void> => {
-    if (!ANTHROPIC_API_KEY) return;
     const result = await deriveObjective(steps);
     if (!result) return;
     const wf = await getWorkflow(id);
@@ -428,27 +435,26 @@ export default defineBackground(() => {
       throw new Error('element not found');
     }
 
-    if (!ANTHROPIC_API_KEY) {
-      throw new Error(
-        `element not found: ${step.target.intent}. This build has no Anthropic API key, so AI repair is unavailable (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
-      );
-    }
-
     let verdict;
     try {
-      verdict = await healStep(
-        { intent: step.target.intent, target: step.target },
-        result.candidates,
-        { title: result.pageTitle, url: result.pageUrl },
-        workflow.objective,
-      );
+      verdict = await healStep({
+        step: { intent: step.target.intent, target: step.target },
+        candidates: result.candidates,
+        page: { title: result.pageTitle, url: result.pageUrl },
+        objective: workflow.objective,
+      });
     } catch (err) {
-      throw new Error(`element not found and AI repair failed: ${describeAiError(err)}`);
+      throw new Error(
+        `element not found: ${step.target.intent}. AI repair failed: ${describeAiError(err)}`,
+      );
     }
-    if (verdict.match == null) {
-      // The cheap text healer is out of its depth (typical for visual widgets
-      // like date pickers). Escalate to the vision agent, scoped to just this
-      // one action.
+    // A low-confidence pick is a guess; acting on it risks clicking the wrong
+    // control silently. Treat it like "no match" and let the vision agent,
+    // which sees the page, decide.
+    if (verdict.match == null || verdict.confidence === 'low') {
+      // The text healer is out of its depth (typical for visual widgets like
+      // date pickers). Escalate to the vision agent, scoped to just this one
+      // action.
       await recoverStepWithAgent(workflow, step, tabId, verdict.reason, stepIndex);
       return;
     }
@@ -529,11 +535,6 @@ export default defineBackground(() => {
     tabId: number,
     objective?: string,
   ): Promise<AgentRunResult> => {
-    if (!ANTHROPIC_API_KEY) {
-      throw new Error(
-        `This AI step ("${goal}") needs an Anthropic API key, but this build has none (set WXT_ANTHROPIC_API_KEY in extension/.env and rebuild).`,
-      );
-    }
     const observe = () =>
       browser.tabs.sendMessage(tabId, { kind: 'agent.snapshot' }) as Promise<AgentSnapshot>;
     const act = async (action: AgentAction) => {
@@ -545,23 +546,26 @@ export default defineBackground(() => {
         ? { ok: true, healedSelectors: 'healedSelectors' in res ? res.healedSelectors : undefined }
         : { ok: false, error: 'error' in res ? res.error : 'failed' };
     };
-    const capture = (dpr: number) => captureTab(tabId, dpr);
 
     let result;
     try {
       result = await runAgentStep(
         goal,
         new Date(),
-        observe,
-        act,
-        capture,
-        (note) => {
-          if (cancelRequested) return;
-          setRunStatus({ agentNote: note });
+        {
+          observe,
+          act,
+          capture: (dpr: number) => captureTab(tabId, dpr),
+          onProgress: (note) => {
+            if (cancelRequested) return;
+            setRunStatus({ agentNote: note });
+          },
+          signal: runAbort?.signal,
         },
         objective,
       );
     } catch (err) {
+      if (err instanceof AiError && err.code === 'cancelled') throw new Error('Run cancelled.');
       throw new Error(`AI step failed: ${describeAiError(err)}`);
     } finally {
       setRunStatus({ agentNote: undefined });
@@ -617,6 +621,7 @@ export default defineBackground(() => {
     const tabId = tab.id;
 
     cancelRequested = false;
+    runAbort = new AbortController();
     run = {
       workflowId: workflow.id,
       workflowName: workflow.name,
@@ -827,6 +832,7 @@ export default defineBackground(() => {
     }
     if (run && run.tabId === tabId && runActive()) {
       cancelRequested = true;
+      runAbort?.abort();
       continueResolver?.(false);
       failureResolver?.('end');
       setRunStatus({ status: 'cancelled' });
@@ -852,7 +858,7 @@ export default defineBackground(() => {
             case 'panel.getState':
               return await panelState();
             case 'panel.startRecording':
-              return await startRecording();
+              return await startRecording(sender.tab?.id);
             case 'panel.stopRecording':
               return await stopRecording(msg.name);
             case 'panel.discardRecording':
@@ -889,6 +895,7 @@ export default defineBackground(() => {
               return await runWorkflow(msg.id);
             case 'panel.cancelRun': {
               cancelRequested = true;
+              runAbort?.abort();
               continueResolver?.(false);
               failureResolver?.('end');
               return { ok: true };
@@ -945,6 +952,43 @@ export default defineBackground(() => {
       return true;
     },
   );
+
+  // ---------------------------------------------------------------------------
+  // E2E hook. Only in builds made with WXT_LEO_E2E=true (the e2e suite); the
+  // condition is a build-time constant, so production bundles drop it.
+  // ---------------------------------------------------------------------------
+
+  if (import.meta.env.WXT_LEO_E2E === 'true') {
+    Object.assign(globalThis, {
+      leoTest: {
+        startRecording: async (url: string) => {
+          const tab = (await browser.tabs.query({})).find((t) => t.url === url);
+          if (tab?.id == null) return { ok: false, error: `no tab at ${url}` };
+          return startRecording(tab.id);
+        },
+        stopRecording: (name: string) => stopRecording(name),
+        discardRecording: async () => {
+          await discardRecording();
+          return { ok: true };
+        },
+        run: (id: string) => runWorkflow(id),
+        state: () => panelState(),
+        saveWorkflow: async (wf: Workflow) => {
+          await saveWorkflow(wf);
+          return { ok: true };
+        },
+        continueRun: () => void continueResolver?.(true),
+        retryStep: () => void failureResolver?.('retry'),
+        skipStep: () => void failureResolver?.('skip'),
+        cancelRun: () => {
+          cancelRequested = true;
+          runAbort?.abort();
+          continueResolver?.(false);
+          failureResolver?.('end');
+        },
+      },
+    });
+  }
 
   // Check the session (and pull the cloud copy if signed in) every time the
   // service worker wakes, so another device's changes appear without any

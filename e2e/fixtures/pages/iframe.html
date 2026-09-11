@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: iframes</title></head>
+<body style="font: 15px system-ui; margin: 40px">
+  <h1>Embedded widgets</h1>
+  <p>Same origin:</p>
+  <iframe id="same" src="/frame-inner.html?name=same" width="420" height="120"></iframe>
+  <p>Cross origin (different site):</p>
+  <iframe id="cross" src="http://localhost:4322/frame-inner.html?name=cross" width="420" height="120"></iframe>
+  <pre id="log"></pre>
+  <script>
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.leoFixture) {
+        document.getElementById('log').textContent += e.data.leoFixture + '\n';
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Leo fixture: signup form</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 520px; margin: 40px auto; }
+    label { display: block; margin: 12px 0 4px; }
+    input[type=text], input[type=email], select { width: 100%; padding: 6px; }
+    button { margin-top: 16px; padding: 8px 16px; }
+    #result { margin-top: 20px; white-space: pre; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>Sign up</h1>
+  <form id="signup">
+    <label for="name">Full name</label>
+    <input id="name" name="name" type="text" placeholder="Your name">
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" placeholder="you@example.com">
+
+    <label for="country">Country</label>
+    <select id="country" name="country">
+      <option value="">Choose…</option>
+      <option value="in">India</option>
+      <option value="de">Germany</option>
+      <option value="jp">Japan</option>
+    </select>
+
+    <label><input id="terms" name="terms" type="checkbox"> I accept the terms</label>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password">
+
+    <button id="submit" type="submit">Submit</button>
+  </form>
+  <div id="result"></div>
+
+  <script>
+    // ?v=2 simulates a redesign: every id, name and the button label change,
+    // so recorded selectors break and replay must heal.
+    if (new URLSearchParams(location.search).get('v') === '2') {
+      const rename = (id, next) => {
+        const el = document.getElementById(id);
+        el.id = next;
+        el.removeAttribute('name');
+        el.className = 'x' + Math.random().toString(16).slice(2, 8);
+      };
+      rename('name', 'fullName');
+      rename('email', 'mail');
+      rename('country', 'region');
+      rename('terms', 'agree');
+      rename('password', 'pw');
+      const btn = document.getElementById('submit');
+      btn.id = 'send';
+      btn.textContent = 'Send form';
+      document.querySelectorAll('label[for]').forEach((l) => l.removeAttribute('for'));
+    }
+    document.getElementById('signup').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const val = (sel) => f.querySelector(sel);
+      document.getElementById('result').textContent = JSON.stringify({
+        name: val('input[type=text]').value,
+        email: val('input[type=email]').value,
+        country: val('select').value,
+        terms: val('input[type=checkbox]').checked,
+        passwordLength: val('input[type=password]').value.length,
+      });
+    });
+  </script>
+</body>
+</html>

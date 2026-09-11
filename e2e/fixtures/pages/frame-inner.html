@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Leo fixture: inner frame</title></head>
+<body style="font: 14px system-ui; margin: 8px">
+  <input id="msg" type="text" placeholder="Message">
+  <button id="send" type="button">Send</button>
+  <script>
+    const name = new URLSearchParams(location.search).get('name');
+    document.getElementById('send').addEventListener('click', () => {
+      parent.postMessage({ leoFixture: name + ':' + document.getElementById('msg').value }, '*');
+    });
+  </script>
+</body>
+</html>

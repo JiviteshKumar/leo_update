@@ -1,10 +1,5 @@
+import { FE_URL } from './env';
 import type { Account, Workflow } from './types';
-
-// Where the Leo web app (fe/) runs. Point at the deployed URL for prod
-// builds. Auth works cookie-based: the extension has host permissions for
-// this origin, so fetches carry the better-auth session cookie and are
-// exempt from CORS/SameSite — no token handling needed.
-export const FE_URL = 'http://localhost:3010';
 
 export const fetchAccount = async (): Promise<Account | null> => {
   try {

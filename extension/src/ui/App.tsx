@@ -7,7 +7,7 @@ import type {
   Step,
   Workflow,
 } from '@/utils/types';
-import { DEFAULT_CURSOR_COLOR, DEFAULT_SPEED, STATE_UPDATE } from '@/utils/types';
+import { DEFAULT_CURSOR_COLOR, DEFAULT_SPEED, STATE_UPDATE, describeStep } from '@/utils/types';
 
 const CURSOR_PRESETS = ['#4c8bf5', '#f5b301', '#e5484d', '#46a758', '#a855f7'];
 
@@ -27,37 +27,7 @@ const send = <T,>(msg: PanelMessage): Promise<T> => {
   }
 };
 
-const stepLabel = (step: Step): string => {
-  switch (step.type) {
-    case 'navigate':
-      return `Go to ${step.url}`;
-    case 'nav-wait':
-      return 'Wait for the page to load';
-    case 'click':
-      return step.target.intent;
-    case 'dblclick':
-      return `Double ${step.target.intent.toLowerCase()}`;
-    case 'type':
-      return step.secret
-        ? `${step.target.intent} (typed manually at run time)`
-        : `${step.target.intent}: "${step.text.slice(0, 30)}${step.text.length > 30 ? '...' : ''}"`;
-    case 'select':
-      return `${step.target.intent}: ${step.label}`;
-    case 'key': {
-      const parts: string[] = [];
-      if (step.mods?.ctrl) parts.push('Ctrl');
-      if (step.mods?.meta) parts.push('Cmd');
-      if (step.mods?.alt) parts.push('Alt');
-      if (step.mods?.shift) parts.push('Shift');
-      parts.push(step.key.length === 1 ? step.key.toUpperCase() : step.key);
-      return `Press ${parts.join('+')}`;
-    }
-    case 'download':
-      return 'Wait for the file download';
-    case 'agent':
-      return `AI: ${step.goal}`;
-  }
-};
+const stepLabel = (step: Step): string => describeStep(step);
 
 export function App() {
   const [state, setState] = useState<PanelState | null>(null);

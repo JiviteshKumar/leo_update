@@ -3,6 +3,7 @@ node_modules/
 
 # WXT build output and generated types
 .output/
+.output-e2e/
 .wxt/
 
 # Environment / secrets
