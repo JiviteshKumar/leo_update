@@ -98,14 +98,22 @@
       btn.replaceWith(next);
     };
 
+    // Every cell is written as text, never as HTML: these strings ARE markup,
+    // and parsing them would put a second live <button id="submit">Submit</button>
+    // on the page — exactly what the recording keyed on, wired to nothing.
     const showDiff = () => {
-      document.getElementById('diffRows').innerHTML = rows
-        .map(
-          (r) =>
-            '<tr><td>' + r[0] + '</td><td class="was">' + r[1] +
-            '</td><td>&rarr;</td><td class="now">' + r[2] + '</td></tr>',
-        )
-        .join('');
+      const table = document.getElementById('diffRows');
+      const cell = (text, className) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        if (className) td.className = className;
+        return td;
+      };
+      for (const [what, was, now] of rows) {
+        const tr = document.createElement('tr');
+        tr.append(cell(what), cell(was, 'was'), cell('→'), cell(now, 'now'));
+        table.append(tr);
+      }
       document.getElementById('diff').hidden = false;
     };
 
@@ -139,7 +147,7 @@
         b.textContent = '\u27a4';
         return b;
       });
-      note('Submit control', '<button id="submit">Submit</button>', '<button id="' + iconId + '">&#10148;</button> — no words at all');
+      note('Submit control', '<button id="submit">Submit</button>', '<button id="' + iconId + '">➤</button> — no words at all');
       showDiff();
       banner.innerHTML =
         '<b>Visit ' + visit + ' — now the control is an unlabelled icon</b> with a random id. ' +
