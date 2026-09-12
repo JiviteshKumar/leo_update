@@ -26,6 +26,7 @@ import type {
   PanelMessage,
   PanelState,
   RecState,
+  RepairRecord,
   RunLogEntry,
   RunRecord,
   RunState,
@@ -54,7 +55,7 @@ const RUN_LOGS_KEY = 'leo:runLogs';
 const UI_OPEN_KEY = 'leo:uiOpen';
 const MAX_RUN_LOGS = 20;
 
-const ACTIVE: readonly RunStatus[] = ['running', 'waiting-user', 'step-failed'];
+const ACTIVE: readonly RunStatus[] = ['running', 'waiting-user', 'step-failed', 'teaching'];
 // Steps that act on the page; the page gets a moment to settle after each.
 const ACTING: readonly Step['type'][] = ['click', 'dblclick', 'type', 'select', 'key', 'agent', 'drag'];
 
@@ -94,6 +95,10 @@ const shortUrl = (u: string): string => {
 // with page-level input.
 class InputLost extends Error {}
 
+// How a paused, failed step resolves: retry it, skip it, end the run, or
+// carry on past the steps the user just demonstrated.
+type FailChoice = { action: 'retry' | 'skip' | 'end' } | { action: 'taught'; count: number };
+
 // Something a step will cause that the *next* step waits for (a navigation,
 // a download, a new tab). Watchers are armed before the step acts, so a
 // fast event can't slip past between the action and the wait.
@@ -123,10 +128,15 @@ export default defineBackground(() => {
   let runAbort: AbortController | null = null;
   let continueResolver: ((ok: boolean) => void) | null = null;
   // Resolves the step-failed pause with the user's choice.
-  let failureResolver: ((choice: 'retry' | 'skip' | 'end') => void) | null = null;
+  let failureResolver: ((choice: FailChoice) => void) | null = null;
   let keepalive: ReturnType<typeof setInterval> | null = null;
   // JPEG data URL of the page when the current run's last step failed.
   let failureShot: string | null = null;
+  // The workflow the current run is executing (its steps are patched in
+  // place by repairs and by teaching).
+  let activeWorkflow: Workflow | null = null;
+  // Set while the user is showing Leo how to do a failed step.
+  let teach: { tabId: number; stepIndex: number; steps: Step[] } | null = null;
   // Leo Cloud session, cached so the panel's poll doesn't hit fe every tick.
   let account: Account | null = null;
   let accountFetched = false;
@@ -268,10 +278,28 @@ export default defineBackground(() => {
     }
   };
 
+  // Move the recording into a tab the recorded page opened. Called both from
+  // tabs.onCreated and from the first step that arrives out of a new tab
+  // (whichever happens first), so nothing done in the moment a popup appears
+  // is lost. Both callers hold the recording lock, so it runs once.
+  type OpenedTab = { openerTabId?: number; pendingUrl?: string; url?: string };
+  const adoptOpenedTab = async (rec: RecState, tabId: number, known?: OpenedTab): Promise<boolean> => {
+    const tab = known ?? (await browser.tabs.get(tabId).catch(() => null));
+    if (!tab || tab.openerTabId !== rec.tabId) return false;
+    const hint = tab.pendingUrl ?? tab.url ?? '';
+    pushStep(rec, { type: 'switch-tab', urlHint: /^https?:/.test(hint) ? hint : '' });
+    rec.tabStack.push(rec.tabId);
+    rec.tabId = tabId;
+    return true;
+  };
+
   const appendRecStep = async (step: Step, replaceLastClicks?: number, fromTabId?: number) => {
     const changed = await recLock(async () => {
       const rec = await getRec();
-      if (!rec || (fromTabId != null && fromTabId !== rec.tabId)) return false;
+      if (!rec) return false;
+      if (fromTabId != null && fromTabId !== rec.tabId && !(await adoptOpenedTab(rec, fromTabId))) {
+        return false;
+      }
       pushStep(rec, step, replaceLastClicks);
       await setRec(rec);
       return true;
@@ -412,10 +440,7 @@ export default defineBackground(() => {
       const changed = await recLock(async () => {
         const rec = await getRec();
         if (!rec || opener !== rec.tabId) return false;
-        const hint = tab.pendingUrl ?? tab.url ?? '';
-        pushStep(rec, { type: 'switch-tab', urlHint: /^https?:/.test(hint) ? hint : '' });
-        rec.tabStack.push(rec.tabId);
-        rec.tabId = newId;
+        if (!(await adoptOpenedTab(rec, newId, tab))) return false;
         await setRec(rec);
         return true;
       });
@@ -493,6 +518,7 @@ export default defineBackground(() => {
     if (ACTIVE.includes(stored.status)) {
       run = {
         ...stored,
+        repairs: stored.repairs ?? [],
         status: 'error',
         error: 'Leo was restarted by the browser during this run.',
         resumeFrom: stored.stepIndex,
@@ -574,8 +600,16 @@ export default defineBackground(() => {
   };
 
   // Wait for the page to stop changing after an action.
-  const settle = async (tabId: number, fast: boolean) => {
-    await toTop(tabId, { kind: 'replay.settle', quietMs: fast ? 150 : 300, maxMs: fast ? 1_200 : 2_500 }, 4_000);
+  // Waits for the page to go quiet; reports whether anything changed at all
+  // (used to check that a repaired step really did something).
+  const settle = async (tabId: number, fast: boolean): Promise<boolean> => {
+    const res = await toTop<{ ok: true; changed: boolean }>(
+      tabId,
+      { kind: 'replay.settle', quietMs: fast ? 150 : 300, maxMs: fast ? 1_200 : 2_500 },
+      4_000,
+    );
+    // No answer (page navigating away): assume it worked.
+    return res?.changed ?? true;
   };
 
   const watchNavigation = (tabId: number): Watch<void> => {
@@ -785,8 +819,53 @@ export default defineBackground(() => {
   // Replay: element steps
   // -------------------------------------------------------------------------
 
-  const markHealed = (i: number) => {
-    if (run) setRunStatus({ healedSteps: [...run.healedSteps, i] });
+  // Records a repair and saves it to the workflow — but only when the step
+  // visibly did something. A repair that changes nothing on the page is
+  // usually the wrong element, so it is reported without being saved.
+  // Did a repaired action actually do something? Typing and dropdowns have
+  // already checked their own value; a click can only be judged by the page
+  // reacting, so compare a fingerprint taken just before the click (URL, text
+  // length, element count, field values) with one taken after it settles. A
+  // click that landed on a dead lookalike changes nothing.
+  const repairWorked = async (
+    step: Step,
+    before: string | undefined,
+    tabId: number,
+    fast: boolean,
+  ): Promise<boolean> => {
+    if (step.type !== 'click' && step.type !== 'dblclick') return true;
+    const changed = await settle(tabId, fast);
+    if (!before) return changed;
+    const framePath = (step as { target?: TargetInfo }).target?.framePath ?? [];
+    const after = await toFrames<{ ok: true; mark: string }>(tabId, { kind: 'replay.mark', framePath }, 4_000);
+    // No answer: the frame is gone, which means the click navigated.
+    if (!after?.mark) return true;
+    return after.mark !== before || changed;
+  };
+
+  const recordRepair = async (
+    workflow: Workflow,
+    i: number,
+    step: Step,
+    fresh: string[],
+    by: RepairRecord['by'],
+    note: string | undefined,
+    tabId: number,
+    fast: boolean,
+    mark?: string,
+  ) => {
+    const verified = await repairWorked(step, mark, tabId, fast);
+    const target = (workflow.steps[i] as { target?: TargetInfo } | undefined)?.target;
+    const before = target ? [...target.selectors] : [];
+    if (verified && fresh.length) await patchStepSelectors(workflow, i, fresh);
+    if (!run) return;
+    setRunStatus({
+      healedSteps: [...run.healedSteps, i],
+      repairs: [
+        ...run.repairs,
+        { index: i, by, note, verified, before, after: target ? [...target.selectors] : fresh },
+      ],
+    });
   };
 
   // Repair a saved workflow step with fresh selectors from a successful AI
@@ -848,8 +927,26 @@ export default defineBackground(() => {
       );
     }
     const fresh = selectorsFromRecovery(result.performed);
+    const target = (workflow.steps[i] as { target?: TargetInfo } | undefined)?.target;
+    const before = target ? [...target.selectors] : [];
     if (fresh) await patchStepSelectors(workflow, i, fresh);
-    markHealed(i);
+    if (run) {
+      setRunStatus({
+        healedSteps: [...run.healedSteps, i],
+        repairs: [
+          ...run.repairs,
+          {
+            index: i,
+            by: 'agent',
+            note: result.note,
+            // The agent performed the action itself and reported success.
+            verified: true,
+            before,
+            after: target ? [...target.selectors] : [],
+          },
+        ],
+      });
+    }
   };
 
   // Locate, hovering to reveal the element first when it's hidden behind a
@@ -947,6 +1044,10 @@ export default defineBackground(() => {
     const loc = await locateRevealing(tabId, cdp, { kind: 'replay.locate', target: step.target, fast }, fast);
     if (loc.ok) {
       await performNative(tabId, step, loc, cdp, fast);
+      // Leo recognised the element itself — no AI was needed.
+      if (loc.repairedBy === 'local' && loc.healedSelectors?.length) {
+        await recordRepair(workflow, i, step, loc.healedSelectors, 'local', loc.repairNote, tabId, fast, loc.mark);
+      }
       return;
     }
     if (!loc.notFound) throw new Error(`${step.target.intent}: ${locateError(loc)}`);
@@ -961,15 +1062,19 @@ export default defineBackground(() => {
     });
     if (!healed.ok) throw new Error(`AI repair failed: ${'error' in healed ? healed.error : 'element not found'}`);
     await performNative(tabId, step, healed, cdp, fast);
-    if (healed.healedSelectors?.length) await patchStepSelectors(workflow, i, healed.healedSelectors);
-    markHealed(i);
+    await recordRepair(workflow, i, step, healed.healedSelectors ?? [], 'ai', undefined, tabId, fast, healed.mark);
   };
 
   // Page-level events (debugger unavailable, and native <select>).
   const execElementCompat = async (workflow: Workflow, i: number, step: ElementStep | KeyStep, fast: boolean) => {
     const tabId = run!.tabId;
     const result = await execInTab(tabId, { kind: 'replay.exec', step, fast });
-    if (result.ok) return;
+    if (result.ok) {
+      if (result.repairedBy === 'local' && result.healedSelectors?.length) {
+        await recordRepair(workflow, i, step, result.healedSelectors, 'local', result.repairNote, tabId, fast, result.mark);
+      }
+      return;
+    }
     if (!('notFound' in result) || !result.notFound) throw new Error(result.error);
     if (step.type === 'key') throw new Error('element not found');
 
@@ -979,8 +1084,7 @@ export default defineBackground(() => {
     if (!healed.ok) {
       throw new Error(`AI repair failed during execution: ${'error' in healed ? healed.error : 'unknown'}`);
     }
-    if (healed.healedSelectors?.length) await patchStepSelectors(workflow, i, healed.healedSelectors);
-    markHealed(i);
+    await recordRepair(workflow, i, step, healed.healedSelectors ?? [], 'ai', undefined, tabId, fast, healed.mark);
   };
 
   // Drags (HTML5 drag-and-drop, sortable lists, sliders) with real mouse
@@ -1267,6 +1371,7 @@ export default defineBackground(() => {
 
   const execute = async (workflow: Workflow, from: number, freshTab: boolean, fast: boolean) => {
     let pending: Expectation = NONE;
+    activeWorkflow = workflow;
     try {
       const firstTab = run!.tabId;
       if (freshTab) await waitForLoad(firstTab, 30_000);
@@ -1305,15 +1410,26 @@ export default defineBackground(() => {
           // Pause instead of aborting: the user decides whether to retry
           // the step, skip it, or end the run here.
           setRunStatus({ status: 'step-failed', error: message, agentNote: undefined });
-          const choice = await new Promise<'retry' | 'skip' | 'end'>((resolve) => {
+          const choice = await new Promise<FailChoice>((resolve) => {
             failureResolver = resolve;
           });
           failureResolver = null;
-          if (choice === 'end') {
+          if (choice.action === 'end') {
             stopRun(cancelRequested ? 'cancelled' : 'error', i, message);
             return;
           }
-          if (choice === 'retry') {
+          if (choice.action === 'taught') {
+            // The user just performed these steps in the page, so they are
+            // done: log them and carry on with the step after them.
+            for (let n = 0; n < choice.count; n++) {
+              logStep(i + n, workflow.steps[i + n].type, 'taught', started);
+            }
+            i += choice.count - 1;
+            pending.dispose();
+            pending = NONE;
+            continue;
+          }
+          if (choice.action === 'retry') {
             // The loop's i++ brings us back to the same step.
             i--;
             continue;
@@ -1331,6 +1447,8 @@ export default defineBackground(() => {
       pending.dispose();
       if (keepalive) clearInterval(keepalive);
       keepalive = null;
+      activeWorkflow = null;
+      teach = null;
       await detachAll();
       await saveRunRecord().catch(() => {});
     }
@@ -1380,6 +1498,7 @@ export default defineBackground(() => {
       totalSteps: workflow.steps.length,
       status: 'running',
       healedSteps: [],
+      repairs: [],
       inputMode: 'native',
       startedAt: Date.now(),
       log: [],
@@ -1398,7 +1517,94 @@ export default defineBackground(() => {
     cancelRequested = true;
     runAbort?.abort();
     continueResolver?.(false);
-    failureResolver?.('end');
+    failureResolver?.({ action: 'end' });
+  };
+
+  // -------------------------------------------------------------------------
+  // "Show me": the user performs the step Leo could not, Leo watches, and
+  // that step is replaced by what they did.
+  // -------------------------------------------------------------------------
+
+  const startTeaching = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (!run || run.status !== 'step-failed' || !activeWorkflow) {
+      return { ok: false, error: 'There is no failed step to take over.' };
+    }
+    teach = { tabId: run.tabId, stepIndex: run.stepIndex, steps: [] };
+    setRunStatus({ status: 'teaching', teachSteps: [] });
+    await browser.tabs.sendMessage(run.tabId, { kind: 'rec.attach' }).catch(() => {});
+    return { ok: true };
+  };
+
+  const pushTeachStep = (step: Step, replaceLastClicks?: number) => {
+    if (!teach) return;
+    const holder: RecState = {
+      active: true,
+      tabId: teach.tabId,
+      tabStack: [],
+      startedAt: 0,
+      steps: teach.steps,
+      lastInteractiveAt: 0,
+    };
+    pushStep(holder, step, replaceLastClicks);
+    teach.steps = holder.steps;
+    setRunStatus({ teachSteps: [...teach.steps] });
+  };
+
+  const finishTeaching = async (save: boolean): Promise<{ ok: boolean; error?: string }> => {
+    if (!teach) return { ok: false, error: 'Leo is not watching right now.' };
+    const { tabId, stepIndex, steps } = teach;
+    const workflow = activeWorkflow;
+    if (!save || steps.length === 0) {
+      teach = null;
+      await browser.tabs.sendMessage(tabId, { kind: 'rec.detach' }).catch(() => {});
+      setRunStatus({ status: 'step-failed', teachSteps: undefined });
+      return save ? { ok: false, error: 'Nothing was recorded yet: do the step in the page first.' } : { ok: true };
+    }
+    if (!workflow) return { ok: false, error: 'The run has ended.' };
+    teach = null;
+    await browser.tabs.sendMessage(tabId, { kind: 'rec.detach' }).catch(() => {});
+
+    // Replace the failed step with what the user did, both in the copy this
+    // run is executing and in storage, so the next run does it by itself.
+    workflow.steps.splice(stepIndex, 1, ...steps);
+    const saved = await updateWorkflow(workflow.id, (stored) => {
+      stored.steps = structuredClone(workflow.steps);
+      stored.updatedAt = Date.now();
+      return stored;
+    });
+    if (saved) pushIfSignedIn(saved);
+    setRunStatus({
+      status: 'running',
+      error: undefined,
+      teachSteps: undefined,
+      totalSteps: workflow.steps.length,
+    });
+    failureResolver?.({ action: 'taught', count: steps.length });
+    return { ok: true };
+  };
+
+  // Put a repaired step back to the selectors it had before.
+  const undoRepair = async (index: number): Promise<{ ok: boolean; error?: string }> => {
+    if (!run) return { ok: false, error: 'There is no run to undo.' };
+    const repair = [...run.repairs].reverse().find((r) => r.index === index && r.verified);
+    if (!repair) return { ok: false, error: 'That step has no saved repair.' };
+    const saved = await updateWorkflow(run.workflowId, (stored) => {
+      const target = (stored.steps[index] as { target?: TargetInfo } | undefined)?.target;
+      if (!target) return null;
+      target.selectors = [...repair.before];
+      stored.healCount = Math.max(0, stored.healCount - 1);
+      stored.updatedAt = Date.now();
+      return stored;
+    });
+    if (!saved) return { ok: false, error: 'That step is gone.' };
+    const live = (activeWorkflow?.steps[index] as { target?: TargetInfo } | undefined)?.target;
+    if (live && activeWorkflow?.id === run.workflowId) live.selectors = [...repair.before];
+    pushIfSignedIn(saved);
+    setRunStatus({
+      repairs: run.repairs.filter((r) => r !== repair),
+      healedSteps: run.healedSteps.filter((h) => h !== index),
+    });
+    return { ok: true };
   };
 
   // -------------------------------------------------------------------------
@@ -1485,11 +1691,16 @@ export default defineBackground(() => {
       try {
         switch (msg.kind) {
           case 'rec.step':
-            await appendRecStep(msg.step, msg.replaceLastClicks, sender.tab?.id);
+            // While teaching, what the user does goes into the step being
+            // replaced rather than into a recording.
+            if (teach && sender.tab?.id === teach.tabId) pushTeachStep(msg.step, msg.replaceLastClicks);
+            else await appendRecStep(msg.step, msg.replaceLastClicks, sender.tab?.id);
             return { ok: true };
           case 'rec.isRecording': {
             const rec = await getRec();
-            return { recording: Boolean(rec && sender.tab?.id === rec.tabId) };
+            const watching =
+              Boolean(rec && sender.tab?.id === rec.tabId) || Boolean(teach && sender.tab?.id === teach.tabId);
+            return { recording: watching };
           }
           case 'panel.getState':
             return await panelState();
@@ -1554,11 +1765,17 @@ export default defineBackground(() => {
             continueResolver?.(true);
             return { ok: true };
           case 'panel.skipStep':
-            failureResolver?.('skip');
+            failureResolver?.({ action: 'skip' });
             return { ok: true };
           case 'panel.retryStep':
-            failureResolver?.('retry');
+            failureResolver?.({ action: 'retry' });
             return { ok: true };
+          case 'panel.teachStep':
+            return await startTeaching();
+          case 'panel.finishTeaching':
+            return await finishTeaching(msg.save);
+          case 'panel.undoRepair':
+            return await undoRepair(msg.index);
           case 'panel.getAccount':
             if (msg.refresh || !accountFetched) await refreshAccount();
             return { account };
@@ -1615,8 +1832,11 @@ export default defineBackground(() => {
           return { ok: true };
         },
         continueRun: () => void continueResolver?.(true),
-        retryStep: () => void failureResolver?.('retry'),
-        skipStep: () => void failureResolver?.('skip'),
+        retryStep: () => void failureResolver?.({ action: 'retry' }),
+        skipStep: () => void failureResolver?.({ action: 'skip' }),
+        teachStep: () => startTeaching(),
+        finishTeaching: (save: boolean) => finishTeaching(save),
+        undoRepair: (index: number) => undoRepair(index),
         cancelRun: () => cancelRun(),
         failureShot: () => failureShot,
         runLog: async () => (await browser.storage.local.get(RUN_LOGS_KEY))[RUN_LOGS_KEY] ?? [],

@@ -75,9 +75,21 @@ Two opt-in suites:
 3. **No races.** Navigations, downloads and new tabs are awaited from before
    the step that causes them; after each action the page is given time to
    settle.
-4. **Self-healing.** If no selector matches, a text-only AI match is tried;
-   low-confidence answers go to a vision agent instead of being clicked. A
-   successful repair is saved, so the next run needs no AI.
-5. **Recoverable.** A failed step pauses the run (retry / skip / end); a
-   stopped run can resume from the step it stopped at. Passwords and files
-   are never stored — the run pauses for the user.
+4. **Repairs itself, mostly without AI.** When no selector matches, Leo
+   scores the page's controls against what it recorded — surviving test ids,
+   labels, text, the element's kind and the text around it. A candidate that
+   both scores well and is clearly ahead of the runner-up is used straight
+   away, with no model call; anything closer than that is a guess, so it goes
+   to the AI healer, and a low-confidence answer there goes to the vision
+   agent rather than being clicked.
+5. **Repairs are checked before they are kept.** A repaired click is only
+   trusted if the page actually reacted (its address, text, controls or field
+   values changed). A repair that changed nothing is reported but not saved,
+   so a wrong guess can't teach Leo the wrong element. Repairs that were kept
+   are listed in the panel with an Undo.
+6. **Recoverable.** A failed step pauses the run (retry / show Leo how /
+   skip / end); a stopped run can resume from the step it stopped at.
+   Passwords and files are never stored — the run pauses for the user.
+7. **You can show it how.** On a step Leo cannot do, "Show me how" puts it
+   into watching mode: do the step by hand and Leo records what you did,
+   replaces the failed step with it, and carries on with the rest of the run.

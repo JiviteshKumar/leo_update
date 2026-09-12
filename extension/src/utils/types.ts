@@ -34,6 +34,8 @@ export interface RecState {
 export type RunStatus =
   | 'running'
   | 'waiting-user'
+  // A step failed and the user is showing Leo how to do it.
+  | 'teaching'
   // A step failed; the run is paused so the user can skip it or end the run.
   | 'step-failed'
   | 'done'
@@ -43,11 +45,27 @@ export type RunStatus =
 export interface RunLogEntry {
   index: number;
   type: Step['type'];
-  outcome: 'ok' | 'healed' | 'skipped' | 'failed';
+  // 'taught': the user demonstrated this step during the run.
+  outcome: 'ok' | 'healed' | 'skipped' | 'failed' | 'taught';
   ms: number;
   error?: string;
   // A screenshot of the page was taken when this step failed.
   screenshot?: boolean;
+}
+
+// A step whose selectors were repaired during a run, kept so the panel can
+// show what changed and undo it.
+export interface RepairRecord {
+  index: number;
+  // 'local': recognised by Leo itself; 'ai': the text healer; 'agent': the
+  // vision agent performed the action.
+  by: 'local' | 'ai' | 'agent';
+  note?: string;
+  // False when the repaired step had no visible effect on the page: the
+  // repair is reported but not saved to the workflow.
+  verified: boolean;
+  before: string[];
+  after: string[];
 }
 
 export interface RunState {
@@ -63,8 +81,12 @@ export interface RunState {
   error?: string;
   // What a 'waiting-user' pause is waiting for.
   waitingFor?: 'password' | 'file';
-  // Step indexes the AI healer repaired during this run.
+  // Step indexes repaired during this run (by Leo or by AI).
   healedSteps: number[];
+  // What each repair changed, newest last.
+  repairs: RepairRecord[];
+  // Steps captured while the user shows Leo how to do a failed step.
+  teachSteps?: Step[];
   // Live activity of a running `agent` step, shown in the run card.
   agentNote?: string;
   // 'native': trusted input through the debugger (the default).
@@ -136,6 +158,12 @@ export type PanelMessage =
   | { kind: 'panel.retryStep' }
   // Continue a stopped run from the step it stopped at, in the same tab.
   | { kind: 'panel.resumeRun' }
+  // Take over a failed step: Leo watches the tab and records what the user
+  // does, then replaces the step with it.
+  | { kind: 'panel.teachStep' }
+  | { kind: 'panel.finishTeaching'; save: boolean }
+  // Put a repaired step's previous selectors back.
+  | { kind: 'panel.undoRepair'; index: number }
   // The screenshot taken when the current run's last step failed.
   | { kind: 'panel.getFailureShot' }
   | { kind: 'panel.getSettings' }
@@ -169,6 +197,8 @@ export type BgToContentMessage =
   | { kind: 'replay.selectAll'; framePath: string[] }
   | { kind: 'replay.focus'; framePath: string[] }
   | { kind: 'replay.verify'; framePath: string[]; value: string }
+  // A fingerprint of the page as it is now, to tell whether an action changed it.
+  | { kind: 'replay.mark'; framePath: string[] }
   | { kind: 'replay.setValue'; framePath: string[]; value: string }
   // Compatible input: the content script finds and acts on the element with
   // page-level events. Also used for native <select>.
@@ -195,14 +225,24 @@ export type BgToContentMessage =
   | { kind: 'ui.ping' };
 
 export type ExecResult =
-  | { ok: true; healedSelectors?: string[] }
+  | { ok: true; healedSelectors?: string[]; repairedBy?: 'local'; repairNote?: string; mark?: string }
   | { ok: false; notFound: true; candidates: Candidate[]; pageTitle: string; pageUrl: string }
   | { ok: false; notFound?: false; error: string };
 
 export type LocateResult =
   // `inputType` is set for <input> elements (date/time/range inputs are
   // set directly rather than typed into).
-  | { ok: true; x: number; y: number; healedSelectors?: string[]; inputType?: string }
+  | {
+      ok: true;
+      x: number;
+      y: number;
+      healedSelectors?: string[];
+      inputType?: string;
+      repairedBy?: 'local';
+      repairNote?: string;
+      // The page fingerprint just before the action (see pageMark).
+      mark?: string;
+    }
   | { ok: false; notFound: true; candidates: Candidate[]; pageTitle: string; pageUrl: string }
   // The element exists but is hidden: move the mouse here (top-level
   // coordinates) to reveal it, then locate again.

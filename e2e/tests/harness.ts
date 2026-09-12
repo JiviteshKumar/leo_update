@@ -18,9 +18,18 @@ export interface RunInfo {
   tabId: number;
   stepIndex: number;
   totalSteps: number;
-  status: 'running' | 'waiting-user' | 'step-failed' | 'done' | 'error' | 'cancelled';
+  status: 'running' | 'waiting-user' | 'teaching' | 'step-failed' | 'done' | 'error' | 'cancelled';
   error?: string;
   healedSteps: number[];
+  repairs: {
+    index: number;
+    by: 'local' | 'ai' | 'agent';
+    note?: string;
+    verified: boolean;
+    before: string[];
+    after: string[];
+  }[];
+  teachSteps?: Workflow['steps'];
   log: { index: number; type: string; outcome: string; ms: number; error?: string; screenshot?: boolean }[];
 }
 export interface HookState {
@@ -42,6 +51,9 @@ type HookFn =
   | 'skipStep'
   | 'cancelRun'
   | 'resumeRun'
+  | 'teachStep'
+  | 'finishTeaching'
+  | 'undoRepair'
   | 'failureShot'
   | 'runLog';
 

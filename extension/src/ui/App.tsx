@@ -127,6 +127,7 @@ export function App() {
     run &&
     (run.status === 'running' ||
       run.status === 'waiting-user' ||
+      run.status === 'teaching' ||
       run.status === 'step-failed');
 
   // ---------------------------------------------------------------------------
@@ -246,6 +247,7 @@ export function App() {
         {run.status === 'running' && `Running: ${run.workflowName}`}
         {run.status === 'waiting-user' && 'Your turn'}
         {run.status === 'step-failed' && 'Step failed'}
+        {run.status === 'teaching' && 'Show Leo how'}
         {!running && (
           <button
             className="ghost small dismiss"
@@ -271,9 +273,27 @@ export function App() {
       )}
       {run.status === 'step-failed' && (
         <p className="hint">
-          This step could not complete. Try it again, skip it and continue with
-          the rest of the workflow, or end the run here.
+          This step could not complete. Try it again, show Leo how to do it, skip
+          it and continue with the rest of the workflow, or end the run here.
         </p>
+      )}
+      {run.status === 'teaching' && (
+        <>
+          <p className="hint">
+            Do this step yourself in the page. Leo is watching, and what you do
+            replaces the step it could not complete — so next time it runs on its
+            own.
+          </p>
+          {(run.teachSteps ?? []).length ? (
+            <ol className="steps">
+              {(run.teachSteps ?? []).map((s, i) => (
+                <li key={i}>{stepLabel(s)}</li>
+              ))}
+            </ol>
+          ) : (
+            <p className="hint">Nothing captured yet.</p>
+          )}
+        </>
       )}
       <div className="progress">
         <div
@@ -283,8 +303,35 @@ export function App() {
       </div>
       <p className="hint">
         Step {Math.min(run.stepIndex + 1, run.totalSteps)} of {run.totalSteps}
-        {run.healedSteps.length > 0 && ` (${run.healedSteps.length} repaired by AI)`}
+        {run.healedSteps.length > 0 && ` (${run.healedSteps.length} repaired)`}
       </p>
+      {run.repairs.length > 0 && (
+        <ul className="repairs">
+          {run.repairs.map((r, i) => (
+            <li key={`${r.index}:${i}`}>
+              <span>
+                Step {r.index + 1} repaired{' '}
+                {r.by === 'local' ? 'by Leo' : r.by === 'ai' ? 'by AI' : 'by the AI agent'}
+                {r.note ? `: ${r.note}` : ''}
+                {!r.verified && ' — not saved, the page did not react'}
+              </span>
+              {r.verified && (
+                <button
+                  className="link"
+                  onClick={() => {
+                    void send<{ ok: boolean; error?: string }>({
+                      kind: 'panel.undoRepair',
+                      index: r.index,
+                    }).then((res) => showError(res.error));
+                  }}
+                >
+                  Undo
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
       {run.status === 'running' && run.agentNote && (
         <p className="hint agent-note">✦ {run.agentNote}</p>
       )}
@@ -305,6 +352,16 @@ export function App() {
             <button className="primary" onClick={() => void send({ kind: 'panel.retryStep' })}>
               Retry step
             </button>
+            <button
+              className="ghost"
+              onClick={() => {
+                void send<{ ok: boolean; error?: string }>({ kind: 'panel.teachStep' }).then((res) =>
+                  showError(res.error),
+                );
+              }}
+            >
+              Show me how
+            </button>
             <button className="ghost" onClick={() => void send({ kind: 'panel.skipStep' })}>
               Skip step
             </button>
@@ -321,6 +378,27 @@ export function App() {
           >
             Resume from step {run.resumeFrom + 1}
           </button>
+        )}
+        {run.status === 'teaching' && (
+          <>
+            <button
+              className="primary"
+              onClick={() => {
+                void send<{ ok: boolean; error?: string }>({
+                  kind: 'panel.finishTeaching',
+                  save: true,
+                }).then((res) => showError(res.error));
+              }}
+            >
+              Done, carry on
+            </button>
+            <button
+              className="ghost"
+              onClick={() => void send({ kind: 'panel.finishTeaching', save: false })}
+            >
+              Never mind
+            </button>
+          </>
         )}
         {running && (
           <button className="ghost" onClick={() => void send({ kind: 'panel.cancelRun' })}>

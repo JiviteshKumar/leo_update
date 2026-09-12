@@ -9,6 +9,7 @@ import {
   isVisible,
   visibleText,
 } from './selectors';
+import { bestLocalMatch } from '@leo/shared';
 import { LEO_UI_HOST } from './types';
 import type {
   AgentAction,
@@ -149,6 +150,26 @@ const waitActionable = async (
   }
 };
 
+// A cheap fingerprint of what the page shows: its address, how much text it
+// has, how many elements, and the state of its fields. Comparing it before
+// and after an action says whether the page reacted — which is how a repair
+// is checked (a wrong element usually does nothing).
+export const pageMark = (): string => {
+  const fields = Array.from(document.querySelectorAll('input, select, textarea'))
+    .slice(0, 200)
+    .map((el) => {
+      const f = el as HTMLInputElement;
+      return f.type === 'checkbox' || f.type === 'radio' ? (f.checked ? '1' : '0') : String((f.value ?? '').length);
+    })
+    .join(',');
+  return [
+    location.href,
+    (document.body?.innerText ?? '').length,
+    document.querySelectorAll('*').length,
+    fields,
+  ].join('|');
+};
+
 // ---------------------------------------------------------------------------
 // Native-input locate + follow-ups
 // ---------------------------------------------------------------------------
@@ -178,6 +199,7 @@ const pointAt = async (
     ok: true,
     x: Math.round(a.x + off.x),
     y: Math.round(a.y + off.y),
+    mark: pageMark(),
     ...(el.tagName === 'INPUT' ? { inputType: (el as HTMLInputElement).type } : {}),
     ...(withSelectors ? { healedSelectors: generateSelectors(el) } : {}),
   };
@@ -238,10 +260,19 @@ export const locate = async (
     if (Date.now() - start >= timeoutMs) break;
     await sleep(250);
   }
+  // No selector matched. Before paying for AI, try to recognise the element
+  // among the page's controls: a clear winner is repaired here and now.
+  const candidates = collectCandidates();
+  const local = bestLocalMatch(target, candidates);
+  const picked = local ? lastCandidates[local.index] : null;
+  if (local && picked?.isConnected) {
+    const res = await pointAt(picked, fast, true, pos);
+    if (res.ok) return { ...res, repairedBy: 'local', repairNote: local.why };
+  }
   return {
     ok: false,
     notFound: true,
-    candidates: collectCandidates(),
+    candidates,
     pageTitle: document.title,
     pageUrl: location.href,
   };
@@ -332,24 +363,30 @@ export const setLocatedValue = async (value: string): Promise<ExecResult> => {
 const isLeoNode = (n: Node): boolean =>
   n instanceof Element && (n.hasAttribute(LEO_NODE_ATTR) || n.tagName.toLowerCase() === LEO_UI_HOST);
 
-export const settle = (quietMs: number, maxMs: number): Promise<{ ok: true }> =>
+export const settle = (quietMs: number, maxMs: number): Promise<{ ok: true; changed: boolean }> =>
   new Promise((resolve) => {
     const start = Date.now();
     let last = start;
+    // Whether anything on the page reacted — used to check that a repaired
+    // step actually did something.
+    let changed = false;
     const obs = new MutationObserver((records) => {
       const pageChange = records.some(
         (r) =>
           !isLeoNode(r.target) &&
           !(r.type === 'childList' && [...r.addedNodes, ...r.removedNodes].every(isLeoNode)),
       );
-      if (pageChange) last = Date.now();
+      if (pageChange) {
+        last = Date.now();
+        changed = true;
+      }
     });
     obs.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
     const tick = () => {
       const now = Date.now();
       if ((now - last >= quietMs && document.readyState === 'complete') || now - start >= maxMs) {
         obs.disconnect();
-        resolve({ ok: true });
+        resolve({ ok: true, changed });
       } else {
         setTimeout(tick, 50);
       }
@@ -503,12 +540,26 @@ export const execStep = async (step: ElementStep | KeyStep, fast = false): Promi
       if (hidden && syntheticHover(hidden)) el = await waitForTarget(step.target, 3_000);
     }
     if (!el) {
+      const candidates = collectCandidates();
+      const local = bestLocalMatch(step.target, candidates);
+      const picked = local ? lastCandidates[local.index] : null;
+      if (!local || !picked?.isConnected) {
+        return {
+          ok: false,
+          notFound: true,
+          candidates,
+          pageTitle: document.title,
+          pageUrl: location.href,
+        };
+      }
+      const mark = pageMark();
+      await performOn(picked, step, fast);
       return {
-        ok: false,
-        notFound: true,
-        candidates: collectCandidates(),
-        pageTitle: document.title,
-        pageUrl: location.href,
+        ok: true,
+        healedSelectors: generateSelectors(picked),
+        repairedBy: 'local',
+        repairNote: local.why,
+        mark,
       };
     }
     await performOn(el, step, fast);
@@ -524,8 +575,9 @@ export const execCandidate = async (index: number, step: ElementStep, fast = fal
   try {
     const el = lastCandidates[index];
     if (!el || !el.isConnected) return { ok: false, error: 'healed element disappeared before execution' };
+    const mark = pageMark();
     await performOn(el, step, fast);
-    return { ok: true, healedSelectors: generateSelectors(el) };
+    return { ok: true, healedSelectors: generateSelectors(el), mark };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -537,7 +589,7 @@ export const execCandidate = async (index: number, step: ElementStep, fast = fal
 
 let lastCandidates: Element[] = [];
 
-const describe = (els: Element[], withRects = false): Candidate[] => {
+const describe = (els: Element[], opts: { rects?: boolean; context?: boolean } = {}): Candidate[] => {
   lastCandidates = els;
   return els.map((el, index) => {
     const attrs: Record<string, string> = {};
@@ -548,7 +600,12 @@ const describe = (els: Element[], withRects = false): Candidate[] => {
       if (v) attrs[a] = v.slice(0, 80);
     }
     const c: Candidate = { index, tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 80), attrs };
-    if (withRects) {
+    if (opts.context) {
+      const parent = el.parentElement ?? ((el.getRootNode() as ShadowRoot).host as HTMLElement | undefined);
+      const around = parent ? ((parent as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim() : '';
+      if (around) c.context = around.slice(0, 120);
+    }
+    if (opts.rects) {
       const r = el.getBoundingClientRect();
       c.rect = { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
     }
@@ -571,7 +628,7 @@ const inLeoUi = (el: Element): boolean => {
 const onPage = (el: Element) => isVisible(el) && !inLeoUi(el);
 
 export const collectCandidates = (): Candidate[] =>
-  describe(deepQueryAll(INTERACTIVE_SELECTOR).filter(onPage).slice(0, 150));
+  describe(deepQueryAll(INTERACTIVE_SELECTOR).filter(onPage).slice(0, 150), { context: true });
 
 // Broader than INTERACTIVE_SELECTOR: the agent must see attribute-poor
 // controls too — calendar arrows (bare <svg> with cursor:pointer), custom
@@ -629,7 +686,7 @@ export const agentSnapshot = (): AgentSnapshot => {
     els = all.filter((el) => keep.has(el));
   }
   return {
-    candidates: describe(els, true),
+    candidates: describe(els, { rects: true }),
     pageText: (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 3000),
     title: document.title,
     url: location.href,

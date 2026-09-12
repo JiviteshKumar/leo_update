@@ -13,6 +13,7 @@ import {
   highlightTarget,
   locate,
   locateCandidate,
+  pageMark,
   selectAllLocated,
   setLocatedValue,
   settle,
@@ -60,23 +61,46 @@ export default defineContentScript({
       detach = null;
     };
 
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const askRecording = async (): Promise<boolean> => {
+      try {
+        const res = (await browser.runtime.sendMessage({ kind: 'rec.isRecording' })) as
+          | { recording: boolean }
+          | undefined;
+        return res?.recording === true;
+      } catch {
+        return false; // extension context not ready
+      }
+    };
+
     // Ask whether this tab is mid-recording (survives navigations). Asked
     // again as the page loads: a tab the recorded page just opened can reach
     // document_start before the recording has switched over to it.
     const checkRecording = async () => {
       if (detach) return;
-      try {
-        const res = (await browser.runtime.sendMessage({ kind: 'rec.isRecording' })) as
-          | { recording: boolean }
-          | undefined;
-        if (res?.recording) startRecording();
-      } catch {
-        // extension context not ready
-      }
+      if (await askRecording()) startRecording();
     };
     void checkRecording();
     document.addEventListener('DOMContentLoaded', () => void checkRecording(), { once: true });
     window.addEventListener('load', () => void checkRecording(), { once: true });
+
+    // A tab another page opened — a sign-in popup, a target=_blank link — is
+    // usually typed into immediately, well before the background has moved
+    // the recording across. Listen from the first event and ask afterwards;
+    // the background discards steps from tabs that aren't being recorded, so
+    // listening too eagerly costs nothing and listening too late loses what
+    // the user did.
+    if (isTop && window.opener) {
+      startRecording();
+      void (async () => {
+        for (const wait of [0, 150, 400, 1_000]) {
+          if (wait) await sleep(wait);
+          if (await askRecording()) return;
+        }
+        stopRecording();
+      })();
+    }
 
     // Reply asynchronously with the promise's result.
     const reply = <T>(p: Promise<T> | T, sendResponse: (r: T) => void): true => {
@@ -147,6 +171,10 @@ export default defineContentScript({
         case 'replay.verify':
           if (!matchesFrame(msg.framePath)) return false;
           sendResponse(verifyLocated(msg.value));
+          return false;
+        case 'replay.mark':
+          if (!matchesFrame(msg.framePath)) return false;
+          sendResponse({ ok: true, mark: pageMark() });
           return false;
         case 'replay.setValue':
           if (!matchesFrame(msg.framePath)) return false;

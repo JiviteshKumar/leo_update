@@ -99,6 +99,11 @@ interface ChatResponse {
 const MAX_RETRIES = 3;
 // Waits longer than this are reported instead of slept through.
 const MAX_RETRY_WAIT_MS = 30_000;
+// Rate limits are counted per minute, so a run that briefly outpaces its
+// quota only needs to wait it out. Waiting is always better than failing a
+// step the user has to restart, so 429s get their own budget instead of the
+// retry count that governs real errors.
+const RATE_LIMIT_BUDGET_MS = 120_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -112,6 +117,35 @@ export const retryDelayMs = (headers: Headers, detail: string): number => {
   return 5_000;
 };
 
+// GPT-OSS sometimes answers with its own reasoning instead of a tool call, or
+// invents one ("commentary"), and Groq rejects both. Re-sending the identical
+// request usually reproduces the same mistake, so a retry changes two things:
+// it spells out which tools exist, and it asks for less internal reasoning,
+// which is what tends to spill into the answer.
+export const afterMalformedOutput = (
+  body: Record<string, unknown>,
+  detail: string,
+): Record<string, unknown> => {
+  const next = { ...body };
+  if (next.reasoning_effort && next.reasoning_effort !== 'low') next.reasoning_effort = 'low';
+
+  const messages = body.messages;
+  const tools = body.tools;
+  if (!Array.isArray(messages) || !Array.isArray(tools)) return next;
+  const names = tools
+    .map((t) => (t as { function?: { name?: string } }).function?.name)
+    .filter((n): n is string => typeof n === 'string');
+  if (!names.length) return next;
+  const invented = /call tool '([^']+)'/.exec(detail)?.[1];
+  const note =
+    `Call exactly one of these tools: ${names.join(', ')}. ` +
+    (invented && !names.includes(invented) ? `There is no "${invented}" tool. ` : '') +
+    'Never invent a tool name, and never answer with prose: anything you want to say belongs in the arguments of a real tool call.';
+  if (messages.some((m) => (m as { content?: unknown }).content === note)) return next;
+  next.messages = [...messages, { role: 'system', content: note }];
+  return next;
+};
+
 const groqProvider = (model: string, apiKey: string): AiProvider => {
   // Retries what is worth retrying: token-per-minute limits (after the wait
   // Groq asks for), transient server errors, and malformed generations —
@@ -119,24 +153,28 @@ const groqProvider = (model: string, apiKey: string): AiProvider => {
   // ("output_parse_failed") or calls a tool that doesn't exist
   // ("tool_use_failed"); a fresh sample usually fixes both.
   const chat = async (body: Record<string, unknown>): Promise<ChatResponse> => {
+    let current = body;
+    let waitedOnLimit = 0;
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(GROQ_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, ...body }),
+        body: JSON.stringify({ model, ...current }),
       });
       if (res.ok) return (await res.json()) as ChatResponse;
       const detail = (await res.text().catch(() => '')).slice(0, 600);
       const parseFailed =
         res.status === 400 && (detail.includes('output_parse_failed') || detail.includes('tool_use_failed'));
-      const retryable = res.status === 429 || res.status >= 500 || parseFailed;
-      if (retryable && attempt < MAX_RETRIES) {
-        const wait = res.status === 429 ? retryDelayMs(res.headers, detail) : 750 * (attempt + 1);
-        if (wait <= MAX_RETRY_WAIT_MS) {
-          console.warn(`[ai:groq] HTTP ${res.status}${parseFailed ? ' (malformed tool call)' : ''}; retrying in ${wait}ms`);
-          await sleep(wait);
-          continue;
-        }
+      const limited = res.status === 429;
+      const retryable = limited || res.status >= 500 || parseFailed;
+      const wait = limited ? retryDelayMs(res.headers, detail) : 750 * (attempt + 1);
+      const allowed = limited ? waitedOnLimit + wait <= RATE_LIMIT_BUDGET_MS : attempt < MAX_RETRIES;
+      if (retryable && allowed && wait <= MAX_RETRY_WAIT_MS) {
+        console.warn(`[ai:groq] HTTP ${res.status}${parseFailed ? ' (malformed tool call)' : ''}; retrying in ${wait}ms`);
+        if (parseFailed) current = afterMalformedOutput(current, detail);
+        if (limited) waitedOnLimit += wait;
+        await sleep(wait);
+        continue;
       }
       throw new ProviderError(`Groq returned HTTP ${res.status}: ${detail.slice(0, 400)}`, res.status);
     }

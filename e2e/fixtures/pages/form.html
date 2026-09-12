@@ -38,9 +38,15 @@
   <div id="result"></div>
 
   <script>
-    // ?v=2 simulates a redesign: every id, name and the button label change,
-    // so recorded selectors break and replay must heal.
-    if (new URLSearchParams(location.search).get('v') === '2') {
+    // Redesign variants used by the repair tests. All of them churn ids,
+    // names and classes, the way a rebuild or a new CSS framework does:
+    //   v=2 the button is relabelled too, so nothing recognisable survives
+    //   v=3 relabelled, plus an identical dead button after the real one
+    //   v=4 relabelled, with the identical dead button first (a wrong pick)
+    //   v=5 the submit <button> becomes a styled <a role=button>, but the
+    //       labels and its wording survive, so Leo can still recognise it
+    const variant = new URLSearchParams(location.search).get('v');
+    if (variant) {
       const rename = (id, next) => {
         const el = document.getElementById(id);
         el.id = next;
@@ -54,8 +60,33 @@
       rename('password', 'pw');
       const btn = document.getElementById('submit');
       btn.id = 'send';
-      btn.textContent = 'Send form';
+      if (variant === '5') {
+        // The rebuild swapped the <button> for a link styled as a button.
+        // Every recorded selector was tag- or id-qualified, so all of them
+        // break, but the control still reads "Submit" in the same place.
+        const link = document.createElement('a');
+        link.id = 'send';
+        link.setAttribute('role', 'button');
+        link.className = btn.className;
+        link.style.cssText = 'display:inline-block;margin-top:16px;padding:8px 16px;border:1px solid #888;cursor:pointer';
+        link.textContent = 'Submit';
+        link.addEventListener('click', () => document.getElementById('signup').requestSubmit());
+        btn.replaceWith(link);
+      } else {
+        btn.textContent = 'Send form';
+      }
       document.querySelectorAll('label[for]').forEach((l) => l.removeAttribute('for'));
+      if (variant === '3' || variant === '4') {
+        // A second control that looks exactly the same and sits in the same
+        // place, but does nothing: only understanding the page tells them
+        // apart. In v=4 it comes first, so a careless repair picks it.
+        const decoy = document.createElement('button');
+        decoy.type = 'button';
+        decoy.id = 'decoy';
+        decoy.textContent = btn.textContent;
+        if (variant === '3') btn.after(decoy);
+        else btn.before(decoy);
+      }
     }
     document.getElementById('signup').addEventListener('submit', (e) => {
       e.preventDefault();

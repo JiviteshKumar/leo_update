@@ -102,6 +102,9 @@ export interface Candidate {
   tag: string;
   text: string;
   attrs: Record<string, string>;
+  // Text around the element (its parent's text), so a repair can tell
+  // apart controls that look identical but sit in different places.
+  context?: string;
   // Viewport-relative bounding box in CSS px. Filled by agentSnapshot() so
   // the vision agent can correlate candidates with the screenshot; the
   // text-only healer path leaves it unset.
