@@ -4,14 +4,32 @@
   <meta charset="utf-8">
   <title>Leo demo: a site that keeps changing</title>
   <style>
-    body { font: 15px system-ui, sans-serif; max-width: 560px; margin: 40px auto; }
+    body { font: 15px system-ui, sans-serif; max-width: 620px; margin: 40px auto; color: #111; }
     label { display: block; margin: 12px 0 4px; }
     input { width: 100%; padding: 6px; }
-    button, a.btn { margin-top: 16px; padding: 8px 16px; }
-    a.btn { display: inline-block; border: 1px solid #888; border-radius: 4px; cursor: pointer; text-decoration: none; color: inherit; }
-    #banner { background: #f3f4f6; border-left: 4px solid #6366f1; padding: 10px 12px; }
-    #result { margin-top: 20px; white-space: pre; font-family: monospace; }
+    button { margin-top: 16px; padding: 8px 16px; }
+    #banner { background: #eef2ff; border-left: 4px solid #6366f1; padding: 10px 12px; }
+    #result { margin-top: 20px; white-space: pre; font-family: ui-monospace, monospace; }
     footer { margin-top: 28px; font-size: 13px; color: #666; }
+    .diff { margin-top: 22px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px 14px; background: #fafafa; }
+    .diff h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin: 0 0 8px; }
+    .diff table { border-collapse: collapse; font: 12.5px ui-monospace, monospace; width: 100%; }
+    .diff td { padding: 3px 6px; vertical-align: top; }
+    .diff td:first-child { color: #6b7280; white-space: nowrap; }
+    .diff .was { color: #b91c1c; }
+    .diff .now { color: #047857; }
+
+    /* The "rebuilt" look: a new design system, the way a real release lands. */
+    body.rebuilt { font-family: Verdana, Geneva, sans-serif; background: #f8fafc; }
+    body.rebuilt h1 { font-size: 26px; letter-spacing: -.02em; }
+    body.rebuilt form { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 8px 20px 22px; }
+    body.rebuilt label { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
+    body.rebuilt input { border: 1px solid #cbd5e1; border-radius: 999px; padding: 10px 14px; background: #f8fafc; }
+    body.rebuilt .cta {
+      display: inline-block; margin-top: 18px; padding: 11px 26px; border-radius: 999px;
+      background: #0f766e; color: #fff; border: 0; cursor: pointer; text-decoration: none; font-weight: 600;
+    }
+    body.rebuilt .icon { width: 44px; height: 44px; padding: 0; border-radius: 999px; font-size: 18px; line-height: 1; }
   </style>
 </head>
 <body>
@@ -29,6 +47,11 @@
   </form>
   <div id="result"></div>
 
+  <div class="diff" id="diff" hidden>
+    <h2>What changed under the hood</h2>
+    <table id="diffRows"></table>
+  </div>
+
   <footer><a href="?reset=1">Start over</a> — back to visit 1.</footer>
 
   <script>
@@ -36,7 +59,7 @@
     // A demo of self-repair you can drive by hand: the page rebuilds itself a
     // little more on each visit, the way a real site does between releases.
     //   visit 1  the original — record here
-    //   visit 2  new ids and classes, and Submit is now a link, not a button
+    //   visit 2  restyled, new ids and classes, and Submit is a link now
     //   visit 3+ the control is an unlabelled icon: nothing is recognisable
     const KEY = 'leo-demo-visit';
     if (new URLSearchParams(location.search).get('reset')) {
@@ -48,16 +71,24 @@
     const visit = Number(localStorage.getItem(KEY) || '0') + 1;
     localStorage.setItem(KEY, String(visit));
 
+    const rows = [];
+    const note = (what, was, now) => rows.push([what, was, now]);
+
+    const rename = (id, label) => {
+      const el = document.getElementById(id);
+      const cls = 'x' + Math.random().toString(16).slice(2, 8);
+      note(label, '#' + id + ', input[name="' + id + '"]', 'input.' + cls + ' — no id, no name');
+      el.id = cls;
+      el.removeAttribute('name');
+      el.className = cls;
+    };
+
     const churn = () => {
-      const rename = (id, next) => {
-        const el = document.getElementById(id);
-        el.id = next;
-        el.removeAttribute('name');
-        el.className = 'x' + Math.random().toString(16).slice(2, 8);
-      };
-      rename('name', 'fullName');
-      rename('email', 'mail');
+      document.body.classList.add('rebuilt');
+      rename('name', 'Full name field');
+      rename('email', 'Email field');
       document.querySelectorAll('label[for]').forEach((l) => l.removeAttribute('for'));
+      note('Labels', 'label[for="name"] tied to the field', 'plain text, tied to nothing');
     };
 
     const replaceSubmit = (make) => {
@@ -67,34 +98,52 @@
       btn.replaceWith(next);
     };
 
+    const showDiff = () => {
+      document.getElementById('diffRows').innerHTML = rows
+        .map(
+          (r) =>
+            '<tr><td>' + r[0] + '</td><td class="was">' + r[1] +
+            '</td><td>&rarr;</td><td class="now">' + r[2] + '</td></tr>',
+        )
+        .join('');
+      document.getElementById('diff').hidden = false;
+    };
+
     const banner = document.getElementById('banner');
     if (visit === 1) {
-      banner.textContent =
-        'Visit 1 — the original page. Record a workflow here: type a name and press Submit.';
+      banner.innerHTML =
+        '<b>Visit 1 — the original page.</b> Record a workflow here: type a name and press Submit.';
     } else if (visit === 2) {
       churn();
       replaceSubmit(() => {
         const a = document.createElement('a');
-        a.className = 'btn';
+        a.className = 'cta';
         a.setAttribute('role', 'button');
         a.textContent = 'Submit';
         return a;
       });
-      banner.textContent =
-        'Visit 2 — the site was rebuilt: every id and class changed, the labels came loose, ' +
-        'and Submit is a link now. Leo should recognise it and repair the step itself, with no AI.';
+      note('Submit control', '<button id="submit">Submit</button>', '<a role="button">Submit</a>');
+      showDiff();
+      banner.innerHTML =
+        '<b>Visit 2 — the site was rebuilt.</b> New design, new ids and classes, the labels came loose, ' +
+        'and Submit is a link now, not a button. Every selector Leo recorded is dead — but it still says ' +
+        '&ldquo;Submit&rdquo; and sits in the same place, so Leo should repair the step itself, with no AI.';
     } else {
       churn();
+      const iconId = 'c' + Math.random().toString(16).slice(2, 8);
       replaceSubmit(() => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.id = 'c' + Math.random().toString(16).slice(2, 8);
+        b.id = iconId;
+        b.className = 'cta icon';
         b.textContent = '\u27a4';
         return b;
       });
-      banner.textContent =
-        'Visit ' + visit + ' — now the control is an unlabelled icon with a random id. ' +
-        'Nothing is recognisable, so Leo should stop and ask: use "Show me how".';
+      note('Submit control', '<button id="submit">Submit</button>', '<button id="' + iconId + '">&#10148;</button> — no words at all');
+      showDiff();
+      banner.innerHTML =
+        '<b>Visit ' + visit + ' — now the control is an unlabelled icon</b> with a random id. ' +
+        'There is nothing left to recognise it by, so Leo should stop and ask: use &ldquo;Show me how&rdquo;.';
     }
 
     document.getElementById('signup').addEventListener('submit', (e) => {

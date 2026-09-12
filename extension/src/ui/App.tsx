@@ -238,6 +238,11 @@ export function App() {
   // Main screen: header + tabs, run/recording status shown on every tab
   // ---------------------------------------------------------------------------
 
+  // Defaults, so a run saved by an older version of Leo (no repair list) shows
+  // the panel instead of blanking it.
+  const repairs = run?.repairs ?? [];
+  const healedSteps = run?.healedSteps ?? [];
+
   const runCard = run && (
     <section className="card">
       <h2>
@@ -303,11 +308,11 @@ export function App() {
       </div>
       <p className="hint">
         Step {Math.min(run.stepIndex + 1, run.totalSteps)} of {run.totalSteps}
-        {run.healedSteps.length > 0 && ` (${run.healedSteps.length} repaired)`}
+        {healedSteps.length > 0 && ` (${healedSteps.length} repaired)`}
       </p>
-      {run.repairs.length > 0 && (
+      {repairs.length > 0 && (
         <ul className="repairs">
-          {run.repairs.map((r, i) => (
+          {repairs.map((r, i) => (
             <li key={`${r.index}:${i}`}>
               <span>
                 Step {r.index + 1} repaired{' '}
@@ -338,8 +343,8 @@ export function App() {
       {(run.status === 'error' || run.status === 'step-failed') && (
         <p className="error">{run.error}</p>
       )}
-      {(run.status === 'error' || run.status === 'step-failed') && run.log.some((e) => e.screenshot) && (
-        <FailureShot key={`${run.workflowId}:${run.startedAt}:${run.log.length}`} />
+      {(run.status === 'error' || run.status === 'step-failed') && (run.log ?? []).some((e) => e.screenshot) && (
+        <FailureShot key={`${run.workflowId}:${run.startedAt}:${(run.log ?? []).length}`} />
       )}
       <div className="row">
         {run.status === 'waiting-user' && (

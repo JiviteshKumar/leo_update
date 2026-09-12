@@ -513,12 +513,20 @@ export default defineBackground(() => {
   // progresses.
   const restoreRun = async () => {
     const res = await browser.storage.session.get(RUN_KEY);
-    const stored = res[RUN_KEY] as RunState | undefined | null;
-    if (!stored || run) return;
+    const raw = res[RUN_KEY] as RunState | undefined | null;
+    if (!raw || run) return;
+    // A run stored by an older version of Leo can be missing fields this one
+    // expects; fill them in rather than handing the panel a half-built run.
+    const stored: RunState = {
+      ...raw,
+      healedSteps: raw.healedSteps ?? [],
+      repairs: raw.repairs ?? [],
+      log: raw.log ?? [],
+      tabStack: raw.tabStack ?? [],
+    };
     if (ACTIVE.includes(stored.status)) {
       run = {
         ...stored,
-        repairs: stored.repairs ?? [],
         status: 'error',
         error: 'Leo was restarted by the browser during this run.',
         resumeFrom: stored.stepIndex,
