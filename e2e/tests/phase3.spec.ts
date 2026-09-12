@@ -139,3 +139,44 @@ test('the user can show Leo how to do a step it cannot', async ({ leo }) => {
   const stored = (await leo.state()).workflows.find((w) => w.id === wf.id)!;
   expect(stored.steps.map((s) => s.type), describeSteps(stored.steps)).toEqual(['navigate', 'type', 'click']);
 });
+
+// The hand-driven demo page (demo.html) rebuilds itself on every visit, and
+// its whole point is that Leo copes. It is easy to break by accident, so the
+// same journey a person would take by hand runs here too.
+test('the demo page: a rebuild that moves everything is repaired without AI', async ({ context, leo }) => {
+  const page = await context.newPage();
+  await page.goto(`${SITE}/demo.html`);
+  await leo.record(page);
+  await page.fill('#name', 'Ada Lovelace');
+  await page.fill('#email', 'ada@example.com');
+  await page.click('#submit');
+  const wf = await leo.stop('Demo', 4);
+  await page.close();
+
+  // Second visit: new ids and classes, labels cut loose from their fields,
+  // the two fields swapped over, a sidebar pushing everything right, and
+  // Submit turned into a link in the opposite corner of the card.
+  const second = await leo.run(wf.id);
+  const repaired = await leo.expectDone();
+  await expect(second.locator('#result')).toContainText('"name":"Ada Lovelace"');
+  await expect(second.locator('#result')).toContainText('"email":"ada@example.com"');
+  expect(await aiCalls()).toBe(0);
+  expect(repaired.repairs.map((r) => `${r.by}/${r.verified}`)).toEqual(['local/true']);
+  await second.close();
+
+  // Third visit: the control is an unlabelled icon with a random id. Nothing
+  // identifies it any more, so Leo stops rather than clicking something at
+  // random — and the user can show it what to do.
+  const third = await leo.run(wf.id);
+  expect((await leo.settle()).status).toBe('step-failed');
+
+  const started = await leo.call<{ ok: boolean; error?: string }>('teachStep');
+  expect(started, started.error).toMatchObject({ ok: true });
+  await expect.poll(async () => (await leo.state()).run?.status).toBe('teaching');
+  await third.click('button.icon');
+  await expect.poll(async () => (await leo.state()).run?.teachSteps?.length ?? 0).toBeGreaterThanOrEqual(1);
+  const saved = await leo.call<{ ok: boolean; error?: string }>('finishTeaching', true);
+  expect(saved, saved.error).toMatchObject({ ok: true });
+  await leo.expectDone();
+  await expect(third.locator('#result')).toContainText('"name":"Ada Lovelace"');
+});

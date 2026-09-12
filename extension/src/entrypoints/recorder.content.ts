@@ -85,13 +85,15 @@ export default defineContentScript({
     document.addEventListener('DOMContentLoaded', () => void checkRecording(), { once: true });
     window.addEventListener('load', () => void checkRecording(), { once: true });
 
-    // A tab another page opened — a sign-in popup, a target=_blank link — is
-    // usually typed into immediately, well before the background has moved
-    // the recording across. Listen from the first event and ask afterwards;
-    // the background discards steps from tabs that aren't being recorded, so
-    // listening too eagerly costs nothing and listening too late loses what
-    // the user did.
-    if (isTop && window.opener) {
+    // A tab that has just opened is usually typed into immediately, well
+    // before the background has decided whether the recording moves across to
+    // it. So listen from the first event and ask afterwards: the background
+    // discards steps from tabs that aren't being recorded, which makes
+    // listening too eagerly free, while listening too late loses what the
+    // user did. This can't be narrowed to tabs another page opened, because
+    // Chrome gives target=_blank links an implicit rel=noopener, so the very
+    // case that needs it has no window.opener to test.
+    if (isTop) {
       startRecording();
       void (async () => {
         for (const wait of [0, 150, 400, 1_000]) {

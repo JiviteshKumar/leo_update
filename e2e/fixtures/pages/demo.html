@@ -4,7 +4,11 @@
   <meta charset="utf-8">
   <title>Leo demo: a site that keeps changing</title>
   <style>
-    body { font: 15px system-ui, sans-serif; max-width: 620px; margin: 40px auto; color: #111; }
+    body { font: 15px system-ui, sans-serif; max-width: 720px; margin: 40px auto; color: #111; background: #fff; }
+    .layout { display: grid; gap: 22px; }
+    aside { font-size: 13px; color: #555; line-height: 1.5; }
+    aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: #6b7280; }
+    form { position: relative; }
     label { display: block; margin: 12px 0 4px; }
     input { width: 100%; padding: 6px; }
     button { margin-top: 16px; padding: 8px 16px; }
@@ -19,32 +23,45 @@
     .diff .was { color: #b91c1c; }
     .diff .now { color: #047857; }
 
-    /* The "rebuilt" look: a new design system, the way a real release lands. */
+    /* The "rebuilt" look: a new design system AND a new layout, the way a real
+       release lands. A sidebar appears and pushes the form right, and the
+       submit control leaves the bottom of the form for the top-right corner. */
     body.rebuilt { font-family: Verdana, Geneva, sans-serif; background: #f8fafc; }
     body.rebuilt h1 { font-size: 26px; letter-spacing: -.02em; }
-    body.rebuilt form { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 8px 20px 22px; }
+    body.rebuilt .layout { grid-template-columns: 190px 1fr; }
+    body.rebuilt form { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 56px 20px 22px; }
     body.rebuilt label { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
     body.rebuilt input { border: 1px solid #cbd5e1; border-radius: 999px; padding: 10px 14px; background: #f8fafc; }
     body.rebuilt .cta {
-      display: inline-block; margin-top: 18px; padding: 11px 26px; border-radius: 999px;
+      position: absolute; top: 14px; right: 18px; margin: 0;
+      display: inline-block; padding: 11px 26px; border-radius: 999px;
       background: #0f766e; color: #fff; border: 0; cursor: pointer; text-decoration: none; font-weight: 600;
     }
-    body.rebuilt .icon { width: 44px; height: 44px; padding: 0; border-radius: 999px; font-size: 18px; line-height: 1; }
+    body.rebuilt .icon { width: 44px; height: 44px; padding: 0; font-size: 18px; line-height: 1; }
   </style>
 </head>
 <body>
   <h1>Sign up</h1>
   <p id="banner"></p>
 
-  <form id="signup">
-    <label for="name">Full name</label>
-    <input id="name" name="name" type="text" placeholder="Your name">
+  <div class="layout">
+    <aside hidden>
+      <h3>Why sign up</h3>
+      <p>A sidebar the old design never had &mdash; everything to its right has shifted over.</p>
+    </aside>
 
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" placeholder="you@example.com">
-
-    <button id="submit" type="submit">Submit</button>
-  </form>
+    <form id="signup">
+      <div class="field">
+        <label for="name">Full name</label>
+        <input id="name" name="name" type="text" placeholder="Your name">
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" placeholder="you@example.com">
+      </div>
+      <button id="submit" type="submit">Submit</button>
+    </form>
+  </div>
   <div id="result"></div>
 
   <div class="diff" id="diff" hidden>
@@ -85,10 +102,20 @@
 
     const churn = () => {
       document.body.classList.add('rebuilt');
+      document.querySelector('aside').hidden = false;
       rename('name', 'Full name field');
       rename('email', 'Email field');
       document.querySelectorAll('label[for]').forEach((l) => l.removeAttribute('for'));
       note('Labels', 'label[for="name"] tied to the field', 'plain text, tied to nothing');
+
+      // The two fields swap over, so anything that remembered "the first
+      // input" or a position on the page now points at the wrong one.
+      const form = document.getElementById('signup');
+      const fields = Array.from(form.querySelectorAll('.field'));
+      form.prepend(fields[1]);
+      fields.forEach((f) => (f.className = 'field y' + Math.random().toString(16).slice(2, 6)));
+      note('Field order', 'Full name, then Email', 'Email first, Full name second');
+      note('Page layout', 'one column, form on the left', 'a sidebar appears and pushes the form right');
     };
 
     const replaceSubmit = (make) => {
@@ -96,6 +123,7 @@
       const next = make();
       next.addEventListener('click', () => document.getElementById('signup').requestSubmit());
       btn.replaceWith(next);
+      note('Submit position', 'under the fields, on the left', 'the top-right corner of the card');
     };
 
     // Every cell is written as text, never as HTML: these strings ARE markup,
@@ -120,7 +148,7 @@
     const banner = document.getElementById('banner');
     if (visit === 1) {
       banner.innerHTML =
-        '<b>Visit 1 — the original page.</b> Record a workflow here: type a name and press Submit.';
+        '<b>Visit 1 — the original page.</b> Record a workflow here: fill both fields and press Submit.';
     } else if (visit === 2) {
       churn();
       replaceSubmit(() => {
@@ -133,9 +161,10 @@
       note('Submit control', '<button id="submit">Submit</button>', '<a role="button">Submit</a>');
       showDiff();
       banner.innerHTML =
-        '<b>Visit 2 — the site was rebuilt.</b> New design, new ids and classes, the labels came loose, ' +
-        'and Submit is a link now, not a button. Every selector Leo recorded is dead — but it still says ' +
-        '&ldquo;Submit&rdquo; and sits in the same place, so Leo should repair the step itself, with no AI.';
+        '<b>Visit 2 — the site was rebuilt.</b> New design, new ids and classes, loose labels, the two ' +
+        'fields swapped over, and Submit is a link now in the top-right corner. Nothing Leo recorded ' +
+        'points anywhere useful — but the fields keep their placeholders and the control still says ' +
+        '&ldquo;Submit&rdquo;, so Leo should work it out itself, with no AI.';
     } else {
       churn();
       const iconId = 'c' + Math.random().toString(16).slice(2, 8);
@@ -150,8 +179,9 @@
       note('Submit control', '<button id="submit">Submit</button>', '<button id="' + iconId + '">➤</button> — no words at all');
       showDiff();
       banner.innerHTML =
-        '<b>Visit ' + visit + ' — now the control is an unlabelled icon</b> with a random id. ' +
-        'There is nothing left to recognise it by, so Leo should stop and ask: use &ldquo;Show me how&rdquo;.';
+        '<b>Visit ' + visit + ' — now the control is an unlabelled icon</b> with a random id, in a ' +
+        'corner it has never been in before. There is nothing left to recognise it by, so Leo should ' +
+        'stop and ask: use &ldquo;Show me how&rdquo;.';
     }
 
     document.getElementById('signup').addEventListener('submit', (e) => {
