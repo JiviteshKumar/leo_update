@@ -29,14 +29,20 @@
     body.rebuilt { font-family: Verdana, Geneva, sans-serif; background: #f8fafc; }
     body.rebuilt h1 { font-size: 26px; letter-spacing: -.02em; }
     body.rebuilt .layout { grid-template-columns: 190px 1fr; }
-    body.rebuilt form { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 56px 20px 22px; }
+    body.rebuilt .layout.aside-right { grid-template-columns: 1fr 190px; }
+    body.rebuilt .layout.aside-right aside { order: 2; }
+    body.rebuilt form { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 58px 20px 62px; }
     body.rebuilt label { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: #64748b; }
     body.rebuilt input { border: 1px solid #cbd5e1; border-radius: 999px; padding: 10px 14px; background: #f8fafc; }
     body.rebuilt .cta {
-      position: absolute; top: 14px; right: 18px; margin: 0;
+      position: absolute; margin: 0;
       display: inline-block; padding: 11px 26px; border-radius: 999px;
       background: #0f766e; color: #fff; border: 0; cursor: pointer; text-decoration: none; font-weight: 600;
     }
+    body.rebuilt .cta.c-tr { top: 14px; right: 18px; }
+    body.rebuilt .cta.c-tl { top: 14px; left: 18px; }
+    body.rebuilt .cta.c-br { bottom: 14px; right: 18px; }
+    body.rebuilt .cta.c-bl { bottom: 14px; left: 18px; }
     body.rebuilt .icon { width: 44px; height: 44px; padding: 0; font-size: 18px; line-height: 1; }
   </style>
 </head>
@@ -59,6 +65,14 @@
         <label for="email">Email</label>
         <input id="email" name="email" type="email" placeholder="you@example.com">
       </div>
+      <div class="field">
+        <label for="company">Company</label>
+        <input id="company" name="company" type="text" placeholder="Where you work">
+      </div>
+      <div class="field">
+        <label for="phone">Phone</label>
+        <input id="phone" name="phone" type="tel" placeholder="+91 00000 00000">
+      </div>
       <button id="submit" type="submit">Submit</button>
     </form>
   </div>
@@ -76,8 +90,12 @@
     // A demo of self-repair you can drive by hand: the page rebuilds itself a
     // little more on each visit, the way a real site does between releases.
     //   visit 1  the original — record here
-    //   visit 2  restyled, new ids and classes, and Submit is a link now
-    //   visit 3+ the control is an unlabelled icon: nothing is recognisable
+    //   even     restyled, fields dealt into a new order, sidebar on either
+    //            side, Submit a link in a random corner: still recognisable,
+    //            so Leo should repair the step itself
+    //   odd 3+   the same shuffle, but the control is an unlabelled icon —
+    //            nothing left to know it by, so Leo should ask for help
+    // Every reload re-randomises, so no two visits look alike.
     const KEY = 'leo-demo-visit';
     if (new URLSearchParams(location.search).get('reset')) {
       localStorage.removeItem(KEY);
@@ -90,6 +108,22 @@
 
     const rows = [];
     const note = (what, was, now) => rows.push([what, was, now]);
+    // Layout is random by default, so a person reloading gets a fresh deal
+    // every time; ?corner=, ?aside= and ?order= pin it for the tests.
+    const params = new URLSearchParams(location.search);
+    const pick = (list, param) => {
+      const forced = params.get(param);
+      return forced && list.includes(forced) ? forced : list[Math.floor(Math.random() * list.length)];
+    };
+
+    // Held before anything is renamed or moved, so the form can always read
+    // its own values back however far the page has been shuffled.
+    const FIELD_IDS = ['name', 'email', 'company', 'phone'];
+    const FIELDS = FIELD_IDS.map((id) => document.getElementById(id));
+    const [nameInput, emailInput] = FIELDS;
+    // What each field was called before the rebuild renamed it, so ?order=
+    // can still name them.
+    const WAS_CALLED = new Map(FIELDS.map((el, i) => [el, FIELD_IDS[i]]));
 
     const rename = (id, label) => {
       const el = document.getElementById(id);
@@ -105,25 +139,53 @@
       document.querySelector('aside').hidden = false;
       rename('name', 'Full name field');
       rename('email', 'Email field');
+      rename('company', 'Company field');
+      rename('phone', 'Phone field');
       document.querySelectorAll('label[for]').forEach((l) => l.removeAttribute('for'));
       note('Labels', 'label[for="name"] tied to the field', 'plain text, tied to nothing');
 
-      // The two fields swap over, so anything that remembered "the first
-      // input" or a position on the page now points at the wrong one.
+      // Every reload deals the fields into a fresh order, so nothing that
+      // remembered "the second input" or a position on the page survives.
       const form = document.getElementById('signup');
       const fields = Array.from(form.querySelectorAll('.field'));
-      form.prepend(fields[1]);
-      fields.forEach((f) => (f.className = 'field y' + Math.random().toString(16).slice(2, 6)));
-      note('Field order', 'Full name, then Email', 'Email first, Full name second');
-      note('Page layout', 'one column, form on the left', 'a sidebar appears and pushes the form right');
+      const forcedOrder = params.get('order');
+      if (forcedOrder) {
+        const wanted = forcedOrder.split(',');
+        const key = (f) => wanted.indexOf(WAS_CALLED.get(f.querySelector('input')));
+        fields.sort((a, b) => key(a) - key(b));
+      } else {
+        for (let i = fields.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [fields[i], fields[j]] = [fields[j], fields[i]];
+        }
+      }
+      fields.forEach((f) => {
+        f.className = 'field y' + Math.random().toString(16).slice(2, 6);
+        form.append(f);
+      });
+      const order = fields.map((f) => f.querySelector('label').textContent).join(', ');
+      note('Field order', 'Full name, Email, Company, Phone', order);
+
+      // …and the sidebar lands on whichever side it feels like today.
+      const side = pick(['left', 'right'], 'aside');
+      document.querySelector('.layout').classList.toggle('aside-right', side === 'right');
+      note('Page layout', 'one column, no sidebar', 'a sidebar on the ' + side + ' shifts the form across');
     };
 
+    const CORNERS = {
+      'c-tr': 'the top-right corner',
+      'c-tl': 'the top-left corner',
+      'c-br': 'the bottom-right corner',
+      'c-bl': 'the bottom-left corner',
+    };
     const replaceSubmit = (make) => {
       const btn = document.getElementById('submit');
       const next = make();
+      const corner = pick(Object.keys(CORNERS), 'corner');
+      next.classList.add(corner);
       next.addEventListener('click', () => document.getElementById('signup').requestSubmit());
       btn.replaceWith(next);
-      note('Submit position', 'under the fields, on the left', 'the top-right corner of the card');
+      note('Submit position', 'under the fields, on the left', CORNERS[corner] + ' of the card');
     };
 
     // Every cell is written as text, never as HTML: these strings ARE markup,
@@ -146,10 +208,13 @@
     };
 
     const banner = document.getElementById('banner');
-    if (visit === 1) {
+    // ?kind=link|icon pins which rebuilt variant appears, so a test doesn't
+    // have to count visits; left alone, they alternate on every reload.
+    const kind = params.get('kind') || (visit === 1 ? 'original' : visit % 2 === 0 ? 'link' : 'icon');
+    if (kind === 'original') {
       banner.innerHTML =
-        '<b>Visit 1 — the original page.</b> Record a workflow here: fill both fields and press Submit.';
-    } else if (visit === 2) {
+        '<b>Visit 1 — the original page.</b> Record a workflow here: fill in Full name and Email, then press Submit.';
+    } else if (kind === 'link') {
       churn();
       replaceSubmit(() => {
         const a = document.createElement('a');
@@ -161,10 +226,11 @@
       note('Submit control', '<button id="submit">Submit</button>', '<a role="button">Submit</a>');
       showDiff();
       banner.innerHTML =
-        '<b>Visit 2 — the site was rebuilt.</b> New design, new ids and classes, loose labels, the two ' +
-        'fields swapped over, and Submit is a link now in the top-right corner. Nothing Leo recorded ' +
-        'points anywhere useful — but the fields keep their placeholders and the control still says ' +
-        '&ldquo;Submit&rdquo;, so Leo should work it out itself, with no AI.';
+        '<b>Visit ' + visit + ' — rebuilt, and dealt a fresh layout on every reload.</b> New ids and ' +
+        'classes, loose labels, the four fields in a new order, the sidebar on either side, and Submit ' +
+        'a link in a different corner each time. Nothing Leo recorded points anywhere useful — but the ' +
+        'fields keep their placeholders and the control still says &ldquo;Submit&rdquo;, so Leo should ' +
+        'work it out itself, with no AI.';
     } else {
       churn();
       const iconId = 'c' + Math.random().toString(16).slice(2, 8);
@@ -179,17 +245,16 @@
       note('Submit control', '<button id="submit">Submit</button>', '<button id="' + iconId + '">➤</button> — no words at all');
       showDiff();
       banner.innerHTML =
-        '<b>Visit ' + visit + ' — now the control is an unlabelled icon</b> with a random id, in a ' +
-        'corner it has never been in before. There is nothing left to recognise it by, so Leo should ' +
-        'stop and ask: use &ldquo;Show me how&rdquo;.';
+        '<b>Visit ' + visit + ' — same shuffle, but the control is an unlabelled icon</b> with a ' +
+        'random id, in a random corner. There is nothing left to recognise it by, so Leo should stop ' +
+        'and ask: use &ldquo;Show me how&rdquo;. Reload again for the recognisable version.';
     }
 
     document.getElementById('signup').addEventListener('submit', (e) => {
       e.preventDefault();
-      const f = e.target;
       document.getElementById('result').textContent = JSON.stringify({
-        name: f.querySelector('input[type=text]').value,
-        email: f.querySelector('input[type=email]').value,
+        name: nameInput.value,
+        email: emailInput.value,
       });
     });
   })();

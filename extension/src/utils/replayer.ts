@@ -80,10 +80,14 @@ export const hideLeoUiAt = (x: number, y: number): boolean => {
   if (!host || !card) return false;
   const r = card.getBoundingClientRect();
   if (r.width === 0 || x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
-  host.style.visibility = 'hidden';
+  // Hide the card, not the host: the menu's shadow root declares
+  // `:host { all: initial !important }`, and an important declaration inside
+  // a shadow tree outranks even an inline style on the host, so anything set
+  // on the host is ignored and the menu keeps swallowing the click.
+  card.style.setProperty('display', 'none', 'important');
   if (uiRestoreTimer) clearTimeout(uiRestoreTimer);
   uiRestoreTimer = setTimeout(() => {
-    host.style.visibility = '';
+    card.style.removeProperty('display');
   }, 1_500);
   return true;
 };
@@ -141,7 +145,11 @@ const waitActionable = async (
           if (hit && composedContains(hit, el) && hit.matches(INTERACTIVE_SELECTOR)) return { ok: true, x, y };
           // A control inside its own <label> (custom checkboxes).
           if (hit instanceof HTMLLabelElement && hit.control === el) return { ok: true, x, y };
-          if (hit && hit.tagName.toLowerCase() === LEO_UI_HOST && hideLeoUiAt(x, y)) continue;
+          // Leo's own floating menu sits bottom-right, right where sites like
+          // to put sticky buttons. deepElementFromPoint reports the element
+          // inside its shadow root rather than the <leo-ui> host, so the
+          // check has to walk back up across the shadow boundary.
+          if (hit && inLeoUi(hit) && hideLeoUiAt(x, y)) continue;
           reason = hit ? `it is covered by ${describeEl(hit)}` : 'it is outside the page';
         }
       }
@@ -268,6 +276,10 @@ export const locate = async (
   if (local && picked?.isConnected) {
     const res = await pointAt(picked, fast, true, pos);
     if (res.ok) return { ...res, repairedBy: 'local', repairNote: local.why };
+    // Recognised, but it can't be acted on: covered by something, still
+    // moving, disabled. Asking the healer would only buy the same element
+    // back, so report what is actually wrong instead of "not found".
+    return res;
   }
   return {
     ok: false,

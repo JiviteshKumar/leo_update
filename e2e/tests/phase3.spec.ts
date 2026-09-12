@@ -140,6 +140,14 @@ test('the user can show Leo how to do a step it cannot', async ({ leo }) => {
   expect(stored.steps.map((s) => s.type), describeSteps(stored.steps)).toEqual(['navigate', 'type', 'click']);
 });
 
+// Point a recorded demo workflow at one of the page's pinned variants. The
+// page shuffles itself at random for a person reloading it; tests say which
+// variant they mean so a failure is always reproducible.
+const aim = async (leo: Leo, wf: Workflow, params: string) => {
+  const url = `${SITE}/demo.html?${params}`;
+  await leo.call('saveWorkflow', { ...wf, startUrl: url, steps: [{ type: 'navigate', url }, ...wf.steps.slice(1)] });
+};
+
 // The hand-driven demo page (demo.html) rebuilds itself on every visit, and
 // its whole point is that Leo copes. It is easy to break by accident, so the
 // same journey a person would take by hand runs here too.
@@ -154,8 +162,9 @@ test('the demo page: a rebuild that moves everything is repaired without AI', as
   await page.close();
 
   // Second visit: new ids and classes, labels cut loose from their fields,
-  // the two fields swapped over, a sidebar pushing everything right, and
-  // Submit turned into a link in the opposite corner of the card.
+  // the four fields dealt into a new order, a sidebar pushing everything
+  // across, and Submit turned into a link in some other corner of the card.
+  await aim(leo, wf, 'kind=link');
   const second = await leo.run(wf.id);
   const repaired = await leo.expectDone();
   await expect(second.locator('#result')).toContainText('"name":"Ada Lovelace"');
@@ -167,6 +176,7 @@ test('the demo page: a rebuild that moves everything is repaired without AI', as
   // Third visit: the control is an unlabelled icon with a random id. Nothing
   // identifies it any more, so Leo stops rather than clicking something at
   // random — and the user can show it what to do.
+  await aim(leo, wf, 'kind=icon');
   const third = await leo.run(wf.id);
   expect((await leo.settle()).status).toBe('step-failed');
 
@@ -179,4 +189,25 @@ test('the demo page: a rebuild that moves everything is repaired without AI', as
   expect(saved, saved.error).toMatchObject({ ok: true });
   await leo.expectDone();
   await expect(third.locator('#result')).toContainText('"name":"Ada Lovelace"');
+});
+
+// Leo's own floating menu sits in the bottom-right corner — exactly where
+// sites put sticky buttons, chat bubbles and cookie banners. It has to get
+// out of its own way rather than blame the page.
+test("a control under Leo's own menu is still clicked", async ({ context, leo }) => {
+  const page = await context.newPage();
+  await page.goto(`${SITE}/demo.html`);
+  await leo.record(page);
+  await page.fill('#name', 'Ada Lovelace');
+  await page.fill('#email', 'ada@example.com');
+  await page.click('#submit');
+  const wf = await leo.stop('Under the menu', 4);
+  await page.close();
+
+  await aim(leo, wf, 'kind=link&corner=c-br&aside=left');
+  const run = await leo.run(wf.id);
+  const result = await leo.expectDone();
+  await expect(run.locator('#result')).toContainText('"name":"Ada Lovelace"');
+  expect(await aiCalls()).toBe(0);
+  expect(result.repairs.map((r) => r.by)).toEqual(['local']);
 });
